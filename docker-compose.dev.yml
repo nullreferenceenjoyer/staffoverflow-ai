@@ -1,0 +1,10 @@
+# Дополнение для разработки: открывает порты базы и API на localhost.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+services:
+  db:
+    ports:
+      - "127.0.0.1:54320:5432"
+
+  api:
+    ports:
+      - "127.0.0.1:8000:8000"

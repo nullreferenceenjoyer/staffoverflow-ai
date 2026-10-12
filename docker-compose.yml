@@ -1,0 +1,123 @@
+# Запуск: cp .env.example .env && docker compose up -d --build
+# Локальная модель из GGUF: положить файл в ./models и добавить профиль llm (см. README).
+
+name: hr-edu
+
+x-backend: &backend
+  build: ./backend
+  restart: unless-stopped
+  environment: &backend-env
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hr}:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}@db:5432/${POSTGRES_DB:-hr_edu}
+    SECRET_KEY: ${SECRET_KEY:?задайте SECRET_KEY в .env}
+    PII_HASH_SALT: ${PII_HASH_SALT:?задайте PII_HASH_SALT в .env}
+    ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.ru}
+    ADMIN_PASSWORD: ${ADMIN_PASSWORD:?задайте ADMIN_PASSWORD в .env}
+    SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+    SEED_DIR: /seed
+    SEED_FILE: ${SEED_FILE:-}
+    STORAGE_DIR: /data/storage
+    LLM_BASE_URL: ${LLM_BASE_URL:-}
+    LLM_MODEL: ${LLM_MODEL:-local}
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-300}
+    LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-900}
+    LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+    LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
+    CLOUD_LLM_ENABLED: ${CLOUD_LLM_ENABLED:-false}
+    CLOUD_LLM_BASE_URL: ${CLOUD_LLM_BASE_URL:-}
+    CLOUD_LLM_MODEL: ${CLOUD_LLM_MODEL:-}
+    CLOUD_LLM_API_KEY: ${CLOUD_LLM_API_KEY:-}
+    EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hashing}
+    EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:-}
+  volumes:
+    - storage:/data/storage
+    - ./seed:/seed:ro
+  extra_hosts:
+    # чтобы из контейнера была видна модель, запущенная на хосте (LM Studio, Ollama)
+    - "host.docker.internal:host-gateway"
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hr_edu}
+      POSTGRES_USER: ${POSTGRES_USER:-hr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Ежедневный дамп базы в ./backups, хранится BACKUP_KEEP_DAYS последних дней
+  backup:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGDATABASE: ${POSTGRES_DB:-hr_edu}
+      PGUSER: ${POSTGRES_USER:-hr}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint: ["sh", "/backup.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Локальная LLM на llama.cpp. Берёт первый .gguf из ./models или файл из LLM_MODEL_FILE.
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    profiles: ["llm"]
+    restart: unless-stopped
+    environment:
+      LLM_MODEL_FILE: ${LLM_MODEL_FILE:-}
+      LLM_CONTEXT: ${LLM_CONTEXT:-8192}
+      LLM_THREADS: ${LLM_THREADS:-}
+    volumes:
+      - ./models:/models:ro
+      - ./scripts/llm-entrypoint.sh:/llm-entrypoint.sh:ro
+    entrypoint: ["sh", "/llm-entrypoint.sh"]
+
+volumes:
+  pgdata:
+  storage:
