@@ -4,6 +4,10 @@
 какая категория персонала и что именно хотят узнать. По результату собираются
 блоки — готовые таблицы в Markdown. Один и тот же текст показывается пользователю
 и кладётся в контекст модели, так что расхождений между ними быть не может.
+
+У каждого блока есть источник: раздел базы данных или документ из базы знаний.
+Если вопрос не распознан и в документах ничего близкого нет, план остаётся пустым —
+помощник в таком случае отвечает, что данных нет, и модель не вызывает.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
+from app.config import get_settings
 from app.services.assistant import Toolbox, normalize
 from app.services.functions import CATEGORY_TITLES
 from app.services.staffing import OrgReport, ru
@@ -37,6 +42,9 @@ INTENTS = {
     "saving": r"эконом|\bфот\b|сэконом|деньг|бюджет|высвобод",
     "territories": r"округ|муниципал|район|территор",
     "program": r"паспорт|цел[ьи] проекта|план\w* высвобожд|дорожн\w* карт",
+    "workload": r"загрузк|загружен|недозагру|просижива|простаива|бездель|площадк|корпус"
+                r"|рядом|соседн|ргис|мощност|заполненност|наполняемост|справится один",
+    "requests": r"заявк|заявок|обращен|исполнител\w* заяв|хозяйственн\w* служб",
 }
 ORG_KINDS = {
     "preschool": r"сад\w*|доу|детск\w+ сад\w*",
@@ -46,10 +54,16 @@ ORG_KINDS = {
 FOLLOW_UP = r"\b(?:них|ним|этом|этой|этих|там|него|нему|ней|подробнее|а по|тоже|еще)\b"
 
 
+DATABASE = "База данных системы"
+
+
 @dataclass
 class Block:
     title: str
     markdown: str
+    source: str = DATABASE
+    # Документы базы знаний, из которых взят текст блока
+    documents: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -70,6 +84,17 @@ class Plan:
             parts.append(text)
             used += len(text)
         return "\n\n".join(parts)
+
+    def sources(self) -> list[dict]:
+        """На что опирается ответ: разделы базы и документы, без повторов."""
+        items: dict[tuple, dict] = {}
+        for block in self.blocks:
+            if not block.documents:
+                items["db", block.title] = {"kind": "database", "title": block.title,
+                                            "ref": block.source}
+            for document in block.documents:
+                items["doc", document["id"]] = {"kind": "document", **document}
+        return list(items.values())
 
 
 def table(headers: list[str], rows: list[list]) -> str:
@@ -232,8 +257,65 @@ def _territories_block(toolbox: Toolbox) -> Block | None:
     return Block("Показатели по муниципалитетам", body)
 
 
-def _knowledge_block(toolbox: Toolbox, question: str) -> Block | None:
-    results = toolbox.knowledge_search(question)["results"]
+def _workload_block(toolbox: Toolbox, municipality) -> Block | None:
+    report = toolbox.workload(municipality)
+    totals = report["totals"]
+    if not totals["sites"]:
+        return None
+    verdicts = {"duplicate": "дублирование в соседних корпусах", "idle": "недозагрузка",
+                "underused": "здание недозаполнено", "overload": "перегрузка"}
+    rows = [[f["site"][:70], f["title"], f["actual"], f["volume"],
+             "—" if f["load_pct"] is None else f"{f['load_pct']} %",
+             f["required"], max(f["excess"], 0) or "", verdicts[f["verdict"]],
+             money(f["saving_year"]) if f["saving_year"] else ""]
+            for f in report["findings"][:ROWS]]
+    head = (
+        f"Площадок (групп корпусов в радиусе {round(report['radius_m'])} м): "
+        f"{totals['sites']}, из них из нескольких корпусов — {totals['shared_sites']}. АУП и ВП "
+        f"занято {ru(totals['actual'])} ст., объём работы — {ru(totals['volume'])} ст., "
+        f"средняя загрузка {totals['load_pct']} %. Можно сократить {ru(totals['excess'])} ст. "
+        f"(из них вакансий {ru(totals['vacant_in_excess'])} ст.), экономия "
+        f"{money(totals['saving_year'])} в год."
+    )
+    body = table(["Площадка", "Функция", "Занято", "Объём работы", "Загрузка", "Достаточно",
+                  "Можно сократить", "Вывод", "Экономия в год"], rows)
+    top = next((f for f in report["findings"] if f["verdict"] in ("duplicate", "idle")), None)
+    note = f"\n\nКрупнейший случай. {top['site']}: {top['recommendation']}" if top else ""
+    where = f": {municipality}" if municipality else ""
+    return Block(f"Загрузка АУП и ВП по площадкам{where}", f"{head}\n\n{body}{note}",
+                 source=f"{DATABASE}: штатные расписания, здания (РГИС), нормативы")
+
+
+def _requests_block(toolbox: Toolbox) -> Block | None:
+    data = toolbox.requests()
+    if not data["total"]:
+        return None
+    head = (
+        f"Всего заявок: {data['total']}, в работе {data['active']}, просрочено "
+        f"{data['overdue']}, без исполнителя {data['unassigned']}, ждут подтверждения "
+        f"заявителя {data['waiting_confirmation']}. За {data['days']} дн. выполнено "
+        f"{data['resolved']}"
+    )
+    if data["resolved"]:
+        head += (f", в срок — {data['in_time_pct']} %, среднее время выполнения "
+                 f"{ru(data['avg_hours'])} ч")
+    parts = [head + ".", table(
+        ["Тема", "Всего", "В работе", "Просрочено", "Среднее время, ч"],
+        [[t["title"], t["total"], t["active"], t["overdue"], t["avg_hours"]]
+         for t in data["by_topic"][:ROWS]],
+    )]
+    if data["overdue_list"]:
+        parts.append("Просроченные:\n" + table(
+            ["№", "Заявка", "Учреждение", "Исполнитель", "Срок"],
+            [[r["id"], r["title"][:60], r["organization"][:50], r["assignee"],
+              r["due"].strftime("%d.%m.%Y")] for r in data["overdue_list"]],
+        ))
+    return Block("Заявки", "\n\n".join(parts), source=f"{DATABASE}: заявки")
+
+
+def _knowledge_block(toolbox: Toolbox, question: str,
+                     min_score: float = 0.0) -> Block | None:
+    results = toolbox.knowledge_search(question, min_score)["results"]
     if not results:
         return None
     # Маленькая модель легко путает соседние нормы в одном абзаце («логопед на 12 детей,
@@ -250,7 +332,10 @@ def _knowledge_block(toolbox: Toolbox, question: str) -> Block | None:
     head = ""
     if quotes:
         head = "Ближе всего к вопросу:\n" + "\n".join(f"- {q}" for q in quotes[:4]) + "\n\n"
-    return Block("Из базы знаний", head + "\n\n".join(parts))
+    documents = [{"id": item["document_id"], "title": item["title"], "ref": item["source"],
+                  "is_summary": not item["is_official_text"]} for item in results[:2]]
+    return Block("Из базы знаний", head + "\n\n".join(parts), source="База знаний",
+                 documents=documents)
 
 
 def _work_block(toolbox: Toolbox) -> Block | None:
@@ -315,6 +400,10 @@ def build_plan(toolbox: Toolbox, question: str, history: list[dict]) -> Plan:
         blocks.append(_centralization_block(toolbox, municipality))
     if "vacancies" in intents:
         blocks.append(_vacancies_block(toolbox, municipality, category))
+    if "workload" in intents:
+        blocks.append(_workload_block(toolbox, municipality))
+    if "requests" in intents:
+        blocks.append(_requests_block(toolbox))
     if "knowledge" in intents:
         blocks.append(_knowledge_block(toolbox, question))
     if "work" in intents:
@@ -324,7 +413,14 @@ def build_plan(toolbox: Toolbox, question: str, history: list[dict]) -> Plan:
 
     # Рейтинг и отклонения — ответ по умолчанию и на всё, что касается избытка и нехватки
     specific = organizations or intents & {"centralization", "knowledge", "work", "program",
-                                           "vacancies"}
+                                           "vacancies", "workload", "requests"}
+    plan.recognized = bool(organizations or intents or category or municipality)
+    if not plan.recognized:
+        # Вопрос не про данные системы. Последняя попытка — поискать в документах,
+        # но только действительно близкие фрагменты, иначе ответ будет ни о чём
+        block = _knowledge_block(toolbox, question, get_settings().assistant_min_relevance)
+        plan.blocks = [block] if block else []
+        return plan
     if not specific or intents & {"shortage", "compliance"}:
         sort = next((s for s in ("shortage", "compliance", "saving") if s in intents), "surplus")
         if len(scoped) > 1:
@@ -332,5 +428,4 @@ def build_plan(toolbox: Toolbox, question: str, history: list[dict]) -> Plan:
         blocks.append(_deviations_block(toolbox, municipality, category))
 
     plan.blocks = [block for block in blocks if block is not None]
-    plan.recognized = bool(organizations or intents or category or municipality)
     return plan

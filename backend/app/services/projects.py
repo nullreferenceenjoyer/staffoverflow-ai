@@ -104,3 +104,41 @@ def centralization_project(reports: list[OrgReport], author: User):
         summary=(f"Учреждений в периметре: {len(reports)}. Высвобождается "
                  f"{ru(scenario['released_total'])} ст."),
     ))
+
+
+def workload_project(report: dict, municipality_id: int, municipality: str, author: User):
+    """Проект по итогам анализа загрузки: сокращение ставок на площадках, где персонал
+    недозагружен. report — результат workload.analyze по одному муниципалитету."""
+    organizations = {
+        site["id"]: site["buildings"][0]["organization_id"]
+        for site in report["sites"] if site["organizations"] == 1
+    }
+    items = [
+        ProjectItem(
+            organization_id=organizations.get(finding["site_id"]),
+            organization_name=finding["site"][:300],
+            function_code=finding["function_code"],
+            title=finding["title"],
+            category=finding["category"],
+            current_rate=Decimal(str(finding["actual"])),
+            proposed_rate=Decimal(str(finding["required"])),
+            fot_effect_year=Decimal(-finding["saving_year"]),
+            vacant_rate=Decimal(str(round(min(finding["vacant"], finding["excess"]), 2))),
+            reason=finding["recommendation"],
+        )
+        for finding in report["findings"] if finding["verdict"] in ("duplicate", "idle")
+    ]
+    if not items:
+        return None
+    totals = report["totals"]
+    return _finalize(Project(
+        title=f"Выравнивание загрузки АУП и ВП по площадкам: {municipality}",
+        kind="workload",
+        municipality_id=municipality_id,
+        created_by_id=author.id,
+        items=items,
+        summary=(f"Площадок: {totals['sites']}, из них с недозагрузкой — "
+                 f"{totals['flagged_sites']}. Занято {ru(totals['actual'])} ст. при объёме "
+                 f"работы {ru(totals['volume'])} ст.; сокращается {ru(totals['excess'])} ст., "
+                 f"из них {ru(totals['vacant_in_excess'])} ст. — вакансии."),
+    ))

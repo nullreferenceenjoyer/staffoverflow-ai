@@ -1,14 +1,11 @@
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import PLANNERS, Scope, audit, get_current_user, get_scope, require_roles
-from app.models import Notification, Project, Role, Task, TaskStatus, User, WorkflowTemplate
+from app.models import Project, Role, Task, TaskStatus, User, WorkflowTemplate
 from app.schemas import (
-    NotificationOut,
     TaskIn,
     TaskOut,
     TaskUpdate,
@@ -160,23 +157,3 @@ def update_task(task_id: int, body: TaskUpdate, request: Request,
     scope.db.commit()
     return task
 
-
-@router.get("/notifications", response_model=list[NotificationOut])
-def list_notifications(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return db.scalars(
-        select(Notification)
-        .where(Notification.user_id == user.id)
-        .order_by(Notification.created_at.desc())
-        .limit(50)
-    ).all()
-
-
-@router.post("/notifications/read", status_code=status.HTTP_204_NO_CONTENT)
-def mark_notifications_read(db: Session = Depends(get_db),
-                            user: User = Depends(get_current_user)):
-    db.execute(
-        update(Notification)
-        .where(Notification.user_id == user.id, Notification.read_at.is_(None))
-        .values(read_at=datetime.now(UTC))
-    )
-    db.commit()

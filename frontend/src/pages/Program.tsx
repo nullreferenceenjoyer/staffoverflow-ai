@@ -2,11 +2,13 @@ import { useState } from 'react'
 
 import { api, DigitalTool, Milestone, ProgramData } from '../api'
 import { useUser } from '../App'
+import { Gantt } from '../components/Gantt'
 import {
   ActionButton,
   Async,
   Badge,
   Card,
+  Counter,
   Empty,
   Field,
   Form,
@@ -219,25 +221,31 @@ export function ProgramPage() {
                 <span className="kpi-label">
                   Цель: −{fmt(s.target_pct)} % ФОТ АУП и ВП до {fmtDate(p.end_date)}
                 </span>
-                <strong>{fmt(s.done_pct)} %</strong>
+                <strong>
+                  <Counter value={s.done_pct} format={(v) => `${fmt(Math.round(v * 10) / 10)} %`} />
+                </strong>
                 <Progress value={s.done_pct} target={s.target_pct} />
                 <span className="kpi-note">
                   {s.days_left >= 0 ? `осталось дней: ${s.days_left}` : 'срок истёк'}
                 </span>
               </div>
               <Kpi
+                icon="wallet"
+                tone="good"
                 label="Экономия ФОТ в год"
-                value={fmtMoney(s.done_saving_year)}
+                value={<Counter value={s.done_saving_year} format={fmtMoney} />}
                 note={`цель ${fmtMoney(s.target_saving_year)}, по паспорту ${fmtMoney(s.plan_saving_year)}`}
               />
               <Kpi
+                icon="bars"
                 label="Расчётный потенциал"
-                value={fmtMoney(s.potential_saving_year)}
+                value={<Counter value={s.potential_saving_year} format={fmtMoney} />}
                 note={`${fmt(s.potential_pct)} % ФОТ — избыток сверх нормативов`}
               />
               <Kpi
+                icon="layers"
                 label="Сценарий централизации"
-                value={fmtMoney(s.centralization_saving_year)}
+                value={<Counter value={s.centralization_saving_year} format={fmtMoney} />}
                 note={`высвобождается ${fmt(s.centralization_released)} ст.`}
               />
             </div>
@@ -290,9 +298,35 @@ export function ProgramPage() {
               </p>
             </Card>
 
+            <Card title="Дорожная карта: диаграмма Ганта">
+              <Gantt
+                empty="Мероприятий нет"
+                items={p.milestones.map((m) => {
+                  const overdue = m.status !== 'done' && new Date(m.end_date) < new Date()
+                  return {
+                    id: m.id,
+                    label: `${m.ordinal}. ${m.title}`,
+                    note: m.responsible ?? undefined,
+                    start: m.start_date,
+                    end: m.end_date,
+                    progress: m.status === 'done' ? 1 : m.status === 'in_progress' ? 0.5 : 0,
+                    tone: overdue
+                      ? 'red'
+                      : m.status === 'done'
+                        ? 'green'
+                        : m.status === 'in_progress'
+                          ? 'blue'
+                          : 'gray',
+                    tip: overdue ? 'Срок прошёл' : MILESTONE_STATUS[m.status].label,
+                    onClick: editable ? () => setMilestone(m) : undefined,
+                  }
+                })}
+              />
+            </Card>
+
             <div className="grid-2">
               <Card
-                title="Дорожная карта"
+                title="Мероприятия"
                 aside={editable && <button onClick={() => setMilestone('new')}>Добавить</button>}
               >
                 <ol className="timeline">

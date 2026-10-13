@@ -2,7 +2,6 @@ import { Fragment, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -11,8 +10,9 @@ import {
   YAxis,
 } from 'recharts'
 
-import { api, OrgDetails, Position, Project } from '../api'
+import { api, Building, OrgDetails, Position, Project } from '../api'
 import { useUser } from '../App'
+import { AXIS, ChartTip, SERIES } from '../components/charts'
 import {
   ActionButton,
   Async,
@@ -113,10 +113,12 @@ function Comparison({ org }: { org: OrgDetails }) {
 
 function Positions({
   orgId,
+  buildings,
   editable,
   onChange,
 }: {
   orgId: number
+  buildings: Building[]
   editable: boolean
   onChange: () => void
 }) {
@@ -128,15 +130,29 @@ function Positions({
     rate: '1',
     monthly_pay: '0',
     is_vacant: false,
+    building_id: '',
   })
 
   async function add() {
     await api(`/organizations/${orgId}/positions`, {
-      body: { ...draft, department: draft.department || null },
+      body: {
+        ...draft,
+        department: draft.department || null,
+        building_id: draft.building_id ? Number(draft.building_id) : null,
+      },
     })
     setAdding(false)
     await state.reload()
     onChange()
+  }
+
+  // Корпус нужен для анализа загрузки по площадкам, поэтому меняется прямо в таблице
+  async function move(id: number, building: string) {
+    await api(`/positions/${id}/building`, {
+      method: 'PUT',
+      query: { building_id: building || null },
+    })
+    await state.reload()
   }
 
   async function remove(id: number) {
@@ -162,6 +178,7 @@ function Positions({
                 <tr>
                   <th>Должность</th>
                   <th>Подразделение</th>
+                  {buildings.length > 1 && <th>Корпус</th>}
                   <th>Категория</th>
                   <th className="num">Ставка</th>
                   <th className="num">Начисления в месяц</th>
@@ -175,6 +192,26 @@ function Positions({
                   <tr key={p.id}>
                     <td>{p.title}</td>
                     <td>{p.department ?? '—'}</td>
+                    {buildings.length > 1 && (
+                      <td>
+                        {editable ? (
+                          <select
+                            value={p.building_id ?? ''}
+                            onChange={(e) => move(p.id, e.target.value)}
+                            aria-label="Корпус"
+                          >
+                            <option value="">не указан</option>
+                            {buildings.map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          (buildings.find((b) => b.id === p.building_id)?.name ?? '—')
+                        )}
+                      </td>
+                    )}
                     <td>{CATEGORY_LABELS[p.category]}</td>
                     <td className="num">{fmt(p.rate)}</td>
                     <td className="num">{fmtInt(p.monthly_pay)} ₽</td>
@@ -234,6 +271,21 @@ function Positions({
                 />
               </Field>
             </div>
+            {buildings.length > 1 && (
+              <Field label="Корпус, где работает ставка">
+                <select
+                  value={draft.building_id}
+                  onChange={(e) => setDraft({ ...draft, building_id: e.target.value })}
+                >
+                  <option value="">Не указан</option>
+                  {buildings.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <label className="check">
               <input
                 type="checkbox"
@@ -248,6 +300,18 @@ function Positions({
       )}
     </Card>
   )
+}
+
+const EMPTY_BUILDING = {
+  name: '',
+  area_sqm: '',
+  floors: '2',
+  address: '',
+  latitude: '',
+  longitude: '',
+  capacity: '',
+  occupancy: '',
+  rgis_id: '',
 }
 
 function SourceData({
@@ -268,8 +332,30 @@ function SourceData({
     students_count: '0',
     special_needs_count: '0',
   })
-  const [building, setBuilding] = useState({ name: '', area_sqm: '', floors: '2' })
+  const [building, setBuilding] = useState(EMPTY_BUILDING)
+  // id здания, которое правим; null — добавляем новое
+  const [buildingId, setBuildingId] = useState<number | null>(null)
   const [dialog, setDialog] = useState<'enrollment' | 'building' | null>(null)
+
+  function editBuilding(b: Building | null) {
+    setBuildingId(b?.id ?? null)
+    setBuilding(
+      b
+        ? {
+            name: b.name,
+            area_sqm: String(b.area_sqm),
+            floors: String(b.floors),
+            address: b.address ?? '',
+            latitude: b.latitude?.toString() ?? '',
+            longitude: b.longitude?.toString() ?? '',
+            capacity: b.capacity?.toString() ?? '',
+            occupancy: b.occupancy?.toString() ?? '',
+            rgis_id: b.rgis_id ?? '',
+          }
+        : EMPTY_BUILDING,
+    )
+    setDialog('building')
+  }
 
   async function saveEnrollment() {
     await api(`/organizations/${org.id}/enrollments`, { method: 'PUT', body: enrollment })
@@ -278,10 +364,28 @@ function SourceData({
   }
 
   async function saveBuilding() {
-    await api(`/organizations/${org.id}/buildings`, { body: building })
+    const current = org.buildings.find((b) => b.id === buildingId)
+    const body = {
+      ...Object.fromEntries(Object.entries(building).map(([key, value]) => [key, value || null])),
+      year_built: current?.year_built ?? null,
+      condition: current?.condition ?? 'satisfactory',
+    }
+    if (buildingId) await api(`/buildings/${buildingId}`, { method: 'PUT', body })
+    else await api(`/organizations/${org.id}/buildings`, { body })
     setDialog(null)
     onChange()
   }
+
+  const buildingField = (key: keyof typeof EMPTY_BUILDING, label: string, type = 'text') => (
+    <Field label={label}>
+      <input
+        type={type}
+        step="any"
+        value={building[key]}
+        onChange={(e) => setBuilding({ ...building, [key]: e.target.value })}
+      />
+    </Field>
+  )
 
   const numberField = (
     key: 'classes_count' | 'students_count' | 'special_needs_count',
@@ -351,27 +455,47 @@ function SourceData({
 
       <Card
         title="Здания"
-        aside={editable && <button onClick={() => setDialog('building')}>Добавить</button>}
+        aside={editable && <button onClick={() => editBuilding(null)}>Добавить</button>}
       >
+        <p className="card-sub">
+          Адрес, координаты и мощность — из РГИС. По ним система понимает, какие корпуса стоят рядом
+          и насколько они заполнены.
+        </p>
         <table>
           <thead>
             <tr>
               <th>Здание</th>
+              <th>Адрес</th>
               <th className="num">Площадь, м²</th>
               <th className="num">Этажей</th>
-              <th className="num">Год постройки</th>
+              <th className="num">Мощность</th>
+              <th className="num">Обучается</th>
               {editable && <th />}
             </tr>
           </thead>
           <tbody>
             {org.buildings.map((b) => (
               <tr key={b.id}>
-                <td>{b.name}</td>
+                <td>
+                  {b.name}
+                  <div className="muted">
+                    {b.rgis_id ?? 'нет кода РГИС'}
+                    {b.year_built && ` · ${b.year_built} г.`}
+                  </div>
+                </td>
+                <td>
+                  {b.address ?? '—'}
+                  {b.latitude === null && <div className="delta-plus">нет координат</div>}
+                </td>
                 <td className="num">{fmt(b.area_sqm)}</td>
                 <td className="num">{b.floors}</td>
-                <td className="num">{b.year_built ?? '—'}</td>
+                <td className="num">{b.capacity ?? '—'}</td>
+                <td className="num">{b.occupancy ?? '—'}</td>
                 {editable && (
-                  <td>
+                  <td className="nowrap">
+                    <button className="ghost" onClick={() => editBuilding(b)}>
+                      Изменить
+                    </button>
                     <ActionButton
                       className="ghost"
                       confirm={`Удалить здание «${b.name}»?`}
@@ -438,7 +562,7 @@ function SourceData({
         </Modal>
       )}
       {dialog === 'building' && (
-        <Modal title="Новое здание" onClose={() => setDialog(null)}>
+        <Modal title={buildingId ? 'Здание' : 'Новое здание'} onClose={() => setDialog(null)}>
           <Form onSubmit={saveBuilding}>
             <Field label="Название">
               <input
@@ -452,6 +576,7 @@ function SourceData({
                 <input
                   type="number"
                   min="1"
+                  step="any"
                   value={building.area_sqm}
                   onChange={(e) => setBuilding({ ...building, area_sqm: e.target.value })}
                   required
@@ -463,9 +588,20 @@ function SourceData({
                   min="1"
                   value={building.floors}
                   onChange={(e) => setBuilding({ ...building, floors: e.target.value })}
+                  required
                 />
               </Field>
             </div>
+            {buildingField('address', 'Адрес')}
+            <div className="row">
+              {buildingField('latitude', 'Широта', 'number')}
+              {buildingField('longitude', 'Долгота', 'number')}
+            </div>
+            <div className="row">
+              {buildingField('capacity', 'Проектная мощность, мест', 'number')}
+              {buildingField('occupancy', 'Фактически обучается', 'number')}
+            </div>
+            {buildingField('rgis_id', 'Код объекта в РГИС')}
           </Form>
         </Modal>
       )}
@@ -506,50 +642,42 @@ function Forecast({ orgId }: { orgId: number }) {
           )
           return (
             <>
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={points}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="year" tick={{ fontSize: 12 }} />
-                  <YAxis yAxisId="students" tick={{ fontSize: 12 }} />
-                  <YAxis yAxisId="need" orientation="right" tick={{ fontSize: 12 }} />
-                  <Tooltip />
-                  <Legend />
-                  <Line
-                    isAnimationActive={false}
-                    yAxisId="students"
-                    dataKey="students"
-                    name="Обучающихся"
-                    stroke="#3b6fd4"
-                    strokeWidth={2}
-                  />
-                  <Line
-                    isAnimationActive={false}
-                    yAxisId="students"
-                    dataKey="studentsF"
-                    name="Обучающихся, прогноз"
-                    stroke="#3b6fd4"
-                    strokeDasharray="5 4"
-                    strokeWidth={2}
-                  />
-                  <Line
-                    isAnimationActive={false}
-                    yAxisId="need"
-                    dataKey="need"
-                    name="Педагогов по нормативу, ст."
-                    stroke="#d9892b"
-                    strokeWidth={2}
-                  />
-                  <Line
-                    isAnimationActive={false}
-                    yAxisId="need"
-                    dataKey="needF"
-                    name="Педагогов, прогноз"
-                    stroke="#d9892b"
-                    strokeDasharray="5 4"
-                    strokeWidth={2}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+              <div className="grid-2">
+                {(
+                  [
+                    ['Обучающихся', 'students', 'studentsF', SERIES[0]],
+                    ['Педагогов по нормативу, ст.', 'need', 'needF', SERIES[1]],
+                  ] as const
+                ).map(([title, fact, plan, color]) => (
+                  <div key={fact}>
+                    <h3>{title}</h3>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={points}>
+                        <CartesianGrid vertical={false} />
+                        <XAxis dataKey="year" {...AXIS} />
+                        <YAxis {...AXIS} width={44} domain={['auto', 'auto']} />
+                        <Tooltip content={<ChartTip />} />
+                        <Line
+                          isAnimationActive={false}
+                          dataKey={fact}
+                          name="Факт"
+                          stroke={color}
+                          strokeWidth={2}
+                        />
+                        <Line
+                          isAnimationActive={false}
+                          dataKey={plan}
+                          name="Прогноз"
+                          stroke={color}
+                          strokeDasharray="5 4"
+                          strokeWidth={2}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                ))}
+              </div>
+              <p className="muted">Сплошная линия — факт, пунктир — прогноз.</p>
               <p className="muted">
                 Прогноз — линейный тренд по годам. Наполняемость классов и доля детей с ОВЗ
                 считаются неизменными.
@@ -623,7 +751,12 @@ export function OrganizationPage() {
           />
           {tab === 'compare' && <Comparison org={org} />}
           {tab === 'positions' && (
-            <Positions orgId={org.id} editable={canEdit(user)} onChange={state.reload} />
+            <Positions
+              orgId={org.id}
+              buildings={org.buildings}
+              editable={canEdit(user)}
+              onChange={state.reload}
+            />
           )}
           {tab === 'data' && (
             <SourceData org={org} editable={canEdit(user)} onChange={state.reload} />

@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -12,16 +13,28 @@ import {
 } from 'recharts'
 
 import { Dashboard } from '../api'
-import { Async, Card, Delta, Kpi, MunicipalitySelect, Page } from '../components/ui'
-import { CATEGORY_SHORT, fmt, fmtInt, fmtMoney, PROJECT_STATUS, useApi } from '../lib'
+import { FindingRow, StatusBar } from '../components/blocks'
+import { AXIS, BAR, ChartTip, Legend, Meter, MUTED, SERIES } from '../components/charts'
+import { Icon } from '../components/icons'
+import { Async, Badge, Card, Counter, Delta, Kpi, MunicipalitySelect, Page } from '../components/ui'
+import {
+  CATEGORY_SHORT,
+  fmt,
+  fmtDay,
+  fmtHours,
+  fmtInt,
+  fmtMoney,
+  PROJECT_STATUS,
+  useApi,
+} from '../lib'
 
 const INTRO_KEY = 'hr-edu-intro-hidden'
 
 const STEPS = [
-  ['1. Данные', 'Загрузите контингент, здания и штатные расписания учреждений.', '/organizations'],
-  ['2. Норматив', 'Система посчитает, сколько ставок положено по нормативам.', '/norms'],
-  ['3. Отклонения', 'Посмотрите, где ставок больше или меньше нормы и почему.', '/analytics'],
-  ['4. Решение', 'Сформируйте проект изменений, документы и задачи.', '/projects'],
+  ['1. Данные', 'Штатные расписания, контингент и здания из РГИС.', '/organizations'],
+  ['2. Загрузка', 'Где персонала больше, чем работы, и почему.', '/workload'],
+  ['3. Решение', 'Проект изменений, документы и задачи со сроками.', '/projects'],
+  ['4. Заявки', 'Текущая работа хозяйственных служб и её сроки.', '/requests'],
 ] as const
 
 /** Короткое объяснение для тех, кто открыл систему впервые. Скрывается одним кликом. */
@@ -42,10 +55,6 @@ function Intro() {
           Скрыть
         </button>
       </div>
-      <p>
-        Система сравнивает фактические штатные расписания с расчётными нормативами и помогает
-        подготовить решение: что сократить, что добавить и какие функции выгоднее объединить.
-      </p>
       <div className="steps">
         {STEPS.map(([title, text, to]) => (
           <Link key={to} to={to} className="step">
@@ -65,7 +74,7 @@ export function DashboardPage() {
   return (
     <Page
       title="Обзор"
-      hint="Сводные показатели по доступным вам учреждениям"
+      hint="Загрузка АУП и вспомогательного персонала, заявки и ход проектов по доступным вам учреждениям"
       actions={<MunicipalitySelect value={municipality} onChange={setMunicipality} />}
     >
       <Intro />
@@ -74,102 +83,173 @@ export function DashboardPage() {
           <>
             <div className="kpis">
               <Kpi
-                label="Численность персонала"
-                value={`${fmt(d.actual_total)} ст.`}
-                note={`${d.organizations} учреждений, ${fmtInt(d.students)} обучающихся`}
+                icon="gauge"
+                tone={(d.workload.load_pct ?? 100) < 85 ? 'warn' : 'good'}
+                label="Загрузка АУП и ВП"
+                value={
+                  <Counter value={d.workload.load_pct ?? 0} format={(v) => `${fmtInt(v)} %`} />
+                }
+                note={`${fmt(d.workload.volume)} ст. работы на ${fmt(d.workload.actual)} занятых`}
               />
               <Kpi
-                label="Соответствие нормативам"
-                value={`${fmt(d.compliance)} %`}
-                note={`норматив ${fmt(d.norm_total)} ст.`}
+                icon="users"
+                label="Можно сократить"
+                value={
+                  <Counter
+                    value={d.workload.excess}
+                    format={(v) => `${fmt(Math.round(v * 4) / 4)} ст.`}
+                  />
+                }
+                note={`из них вакансии — ${fmt(d.workload.vacant_in_excess)} ст., площадок: ${d.workload.flagged_sites}`}
               />
               <Kpi
-                label="Избыток / нехватка"
-                value={`${fmt(d.surplus)} / ${fmt(d.shortage)} ст.`}
-                note="сумма отклонений по функциям"
+                icon="wallet"
+                tone="good"
+                label="Экономия ФОТ в год"
+                value={<Counter value={d.workload.saving_year} format={fmtMoney} />}
+                note={`при ФОТ ${fmtMoney(d.fot_actual_year)}`}
               />
               <Kpi
-                label="Потенциал экономии ФОТ"
-                value={fmtMoney(d.saving_potential_year)}
-                note={`в год, при ФОТ ${fmtMoney(d.fot_actual_year)}`}
+                icon="inbox"
+                tone={d.requests.overdue ? 'critical' : undefined}
+                label="Заявки в работе"
+                value={<Counter value={d.requests.active} format={fmtInt} />}
+                note={
+                  d.requests.overdue ? (
+                    <Link to="/requests">просрочено: {d.requests.overdue}</Link>
+                  ) : (
+                    'просроченных нет'
+                  )
+                }
               />
             </div>
 
+            <div className="grid-wide">
+              <Card
+                title="Что предлагает система"
+                aside={
+                  <Link to="/workload">
+                    Все площадки <Icon name="arrow" size={14} />
+                  </Link>
+                }
+              >
+                {d.workload.findings.length ? (
+                  d.workload.findings.map((f) => (
+                    <FindingRow
+                      key={`${f.site_id}-${f.function_code}-${f.organization}`}
+                      finding={f}
+                    />
+                  ))
+                ) : (
+                  <p className="muted">Недозагруженного персонала не найдено.</p>
+                )}
+              </Card>
+
+              <Card title="Загрузка по функциям">
+                <p className="card-sub">Объём работы к занятым ставкам. Черта — 100 %.</p>
+                {d.workload.by_function.map((f) => (
+                  <Meter
+                    key={f.function_code}
+                    label={f.title}
+                    value={f.load_pct}
+                    max={125}
+                    mark={100}
+                    low={(f.load_pct ?? 100) < 85}
+                    title={`${f.title}: занято ${fmt(f.actual)} ст., работы на ${fmt(f.volume)} ст.`}
+                  />
+                ))}
+              </Card>
+            </div>
+
             <div className="grid-2">
+              <Card title="Заявки за 30 дней" aside={<Link to="/requests">К заявкам</Link>}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <AreaChart data={d.requests.flow.map((p) => ({ ...p, name: fmtDay(p.date) }))}>
+                    <CartesianGrid vertical={false} />
+                    <XAxis dataKey="name" {...AXIS} minTickGap={28} />
+                    <YAxis {...AXIS} allowDecimals={false} width={28} />
+                    <Tooltip content={<ChartTip format={fmtInt} />} />
+                    <Area
+                      isAnimationActive={false}
+                      type="monotone"
+                      dataKey="created"
+                      name="Создано"
+                      stroke={SERIES[0]}
+                      strokeWidth={2}
+                      fill={SERIES[0]}
+                      fillOpacity={0.12}
+                    />
+                    <Area
+                      isAnimationActive={false}
+                      type="monotone"
+                      dataKey="closed"
+                      name="Выполнено"
+                      stroke={SERIES[2]}
+                      strokeWidth={2}
+                      fill={SERIES[2]}
+                      fillOpacity={0.12}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+                <Legend
+                  items={[
+                    ['Создано', SERIES[0]],
+                    ['Выполнено', SERIES[2]],
+                  ]}
+                />
+                <p className="muted">
+                  Среднее время выполнения — {fmtHours(d.requests.avg_hours)}, в срок —{' '}
+                  {d.requests.in_time_pct ?? '—'} %. Ждут подтверждения заявителя:{' '}
+                  {d.requests.waiting_confirmation}, без исполнителя: {d.requests.unassigned}.
+                </p>
+                <StatusBar items={d.requests.by_status} />
+              </Card>
+
               <Card title="Факт и норматив по категориям, ставок">
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={d.categories.map((c) => ({ ...c, name: CATEGORY_SHORT[c.key] }))}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                    <YAxis tick={{ fontSize: 12 }} />
-                    <Tooltip formatter={(v: number) => fmt(v)} />
-                    <Legend />
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart
+                    data={d.categories.map((c) => ({ ...c, name: CATEGORY_SHORT[c.key] }))}
+                    barGap={2}
+                  >
+                    <CartesianGrid vertical={false} />
+                    <XAxis dataKey="name" {...AXIS} />
+                    <YAxis {...AXIS} width={44} />
+                    <Tooltip content={<ChartTip />} />
                     <Bar
                       isAnimationActive={false}
                       dataKey="actual"
                       name="Факт"
-                      fill="#3b6fd4"
-                      radius={[3, 3, 0, 0]}
+                      fill={SERIES[0]}
+                      {...BAR}
                     />
                     <Bar
                       isAnimationActive={false}
                       dataKey="norm"
                       name="Норматив"
-                      fill="#a9b8d6"
-                      radius={[3, 3, 0, 0]}
+                      fill={MUTED}
+                      {...BAR}
                     />
                   </BarChart>
                 </ResponsiveContainer>
-              </Card>
-
-              <Card
-                title="Эффект централизации АУП и ВП"
-                aside={<Link to="/centralization">Подробнее</Link>}
-              >
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart
-                    data={d.centralization.stages.map((s) => ({
-                      ...s,
-                      name: CATEGORY_SHORT[s.category],
-                    }))}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                    <YAxis tick={{ fontSize: 12 }} />
-                    <Tooltip formatter={(v: number) => fmt(v)} />
-                    <Legend />
-                    <Bar
-                      isAnimationActive={false}
-                      dataKey="actual"
-                      name="Сейчас"
-                      fill="#3b6fd4"
-                      radius={[3, 3, 0, 0]}
-                    />
-                    <Bar
-                      isAnimationActive={false}
-                      dataKey="norm"
-                      name="По нормативу"
-                      fill="#a9b8d6"
-                      radius={[3, 3, 0, 0]}
-                    />
-                    <Bar
-                      isAnimationActive={false}
-                      dataKey="centralized"
-                      name="После централизации"
-                      fill="#2f9e83"
-                      radius={[3, 3, 0, 0]}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
+                <Legend
+                  items={[
+                    ['Факт', SERIES[0]],
+                    ['Норматив', MUTED],
+                  ]}
+                />
                 <p className="muted">
-                  Высвобождается {fmt(d.centralization.released_total)} ст., экономия до{' '}
-                  {fmtMoney(d.centralization.saving_year)} в год.
+                  Всего {fmt(d.actual_total)} ст. при нормативе {fmt(d.norm_total)} ст.,
+                  соответствие {fmt(d.compliance)} %. {d.organizations} учреждений,{' '}
+                  {fmtInt(d.students)} обучающихся.
                 </p>
               </Card>
             </div>
 
             <div className="grid-2">
-              <Card title="Учреждения с наибольшим потенциалом экономии">
+              <Card
+                title="Учреждения с наибольшим потенциалом экономии"
+                aside={<Link to="/organizations">Все учреждения</Link>}
+              >
                 <table>
                   <thead>
                     <tr>
@@ -195,13 +275,16 @@ export function DashboardPage() {
               </Card>
 
               <div>
-                <Card title="Проекты оптимизации" aside={<Link to="/projects">Все проекты</Link>}>
+                <Card
+                  title="Проекты и централизация"
+                  aside={<Link to="/projects">Все проекты</Link>}
+                >
                   {Object.keys(d.projects_by_status).length ? (
                     <div className="chips">
                       {Object.entries(d.projects_by_status).map(([status, count]) => (
-                        <span key={status} className="chip">
-                          {PROJECT_STATUS[status]?.label ?? status}: <strong>{count}</strong>
-                        </span>
+                        <Badge key={status} tone={PROJECT_STATUS[status]?.tone}>
+                          {PROJECT_STATUS[status]?.label ?? status}: {count}
+                        </Badge>
                       ))}
                     </div>
                   ) : (
@@ -212,6 +295,11 @@ export function DashboardPage() {
                       Просроченных задач: {d.overdue_tasks}. <Link to="/workflow">Открыть</Link>
                     </p>
                   ) : null}
+                  <p className="muted">
+                    Сценарий <Link to="/centralization">централизации</Link> высвобождает{' '}
+                    {fmt(d.centralization.released_total)} ст. — до{' '}
+                    {fmtMoney(d.centralization.saving_year)} в год.
+                  </p>
                 </Card>
 
                 {d.municipalities.length > 1 && (

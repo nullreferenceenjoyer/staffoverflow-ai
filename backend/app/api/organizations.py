@@ -2,6 +2,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.deps import EDITORS, PLANNERS, Scope, audit, get_scope, require_roles
 from app.models import (
@@ -153,7 +154,31 @@ def add_building(org_id: int, body: BuildingIn, request: Request,
     scope.db.add(building)
     audit(scope.db, user, "building_added", entity="organization", entity_id=org.id,
           request=request)
-    scope.db.commit()
+    try:
+        scope.db.commit()
+    except IntegrityError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Такой код объекта РГИС уже есть у другого здания") from exc
+    return building
+
+
+@router.put("/buildings/{building_id}", response_model=BuildingOut)
+def update_building(building_id: int, body: BuildingIn, request: Request,
+                    user: User = Depends(require_roles(*EDITORS)),
+                    scope: Scope = Depends(get_scope)):
+    building = scope.db.get(Building, building_id)
+    if building is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Здание не найдено")
+    scope.get_org(building.organization_id)
+    for key, value in body.model_dump().items():
+        setattr(building, key, value)
+    audit(scope.db, user, "building_updated", entity="organization",
+          entity_id=building.organization_id, request=request)
+    try:
+        scope.db.commit()
+    except IntegrityError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Такой код объекта РГИС уже есть у другого здания") from exc
     return building
 
 
@@ -228,6 +253,9 @@ def add_position(org_id: int, body: PositionIn, request: Request,
                  scope: Scope = Depends(get_scope)):
     org = scope.get_org(org_id)
     function = BY_CODE.get(body.function_code or "") or classify_title(body.title)
+    if body.building_id is not None and body.building_id not in {b.id for b in org.buildings}:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Корпус не относится к учреждению")
     data = body.model_dump(exclude={"function_code", "is_vacant"})
     position = StaffPosition(
         organization_id=org.id,
@@ -240,6 +268,23 @@ def add_position(org_id: int, body: PositionIn, request: Request,
     scope.db.add(position)
     audit(scope.db, user, "position_added", entity="organization", entity_id=org.id,
           details={"title": body.title, "rate": str(body.rate)}, request=request)
+    scope.db.commit()
+    return position
+
+
+@router.put("/positions/{position_id}/building", response_model=PositionOut)
+def move_position(position_id: int, building_id: int | None = None,
+                  user: User = Depends(require_roles(*EDITORS)),
+                  scope: Scope = Depends(get_scope)):
+    """Закрепляет ставку за корпусом — от этого зависит анализ загрузки по площадкам."""
+    position = scope.db.get(StaffPosition, position_id)
+    if position is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Строка не найдена")
+    org = scope.get_org(position.organization_id)
+    if building_id is not None and building_id not in {b.id for b in org.buildings}:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Корпус не относится к учреждению")
+    position.building_id = building_id
     scope.db.commit()
     return position
 
@@ -267,7 +312,7 @@ def import_file(kind: str, request: Request, file: UploadFile = File(...),
                 replace: bool = Form(True),
                 user: User = Depends(require_roles(*EDITORS)),
                 scope: Scope = Depends(get_scope)):
-    if kind not in ("staffing", "enrollment"):
+    if kind not in ("staffing", "enrollment", "buildings"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Неизвестный тип импорта")
     content = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
@@ -280,6 +325,8 @@ def import_file(kind: str, request: Request, file: UploadFile = File(...),
         rows = importer.read_table(file.filename or "", content)
         if kind == "staffing":
             result = importer.import_staffing(db, rows, allowed_org_ids=allowed, replace=replace)
+        elif kind == "buildings":
+            result = importer.import_buildings(db, rows, allowed_org_ids=allowed)
         else:
             result = importer.import_enrollment(db, rows, allowed_org_ids=allowed)
     except importer.ImportFormatError as exc:

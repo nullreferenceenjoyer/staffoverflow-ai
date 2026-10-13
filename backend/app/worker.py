@@ -1,4 +1,4 @@
-"""Фоновый процесс: напоминания о сроках и боты в мессенджерах.
+"""Фоновый процесс: напоминания о сроках, автозакрытие заявок и боты в мессенджерах.
 
 Вынесен из API, чтобы веб-сервер можно было запускать в несколько экземпляров,
 не получая дублей уведомлений. Запуск: python -m app.worker
@@ -12,7 +12,7 @@ import httpx
 from app.bot.handler import create_bots
 from app.config import get_settings
 from app.db import SessionLocal
-from app.services import workflow
+from app.services import helpdesk, workflow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("worker")
@@ -21,9 +21,13 @@ log = logging.getLogger("worker")
 def check_deadlines() -> None:
     with SessionLocal() as db:
         created = workflow.remind_about_deadlines(db)
+        requests = helpdesk.run_automation(db)
         db.commit()
     if created:
         log.info("Created %d deadline notifications", len(created))
+    if any(requests.values()):
+        log.info("Requests: %d reminders, %d closed automatically", requests["reminded"],
+                 requests["closed"])
 
 
 def main() -> None:

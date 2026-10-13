@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
@@ -12,11 +13,13 @@ from app.models import (
     Building,
     Category,
     Enrollment,
+    IncomingRequest,
     Municipality,
     Norm,
     Organization,
     StaffPosition,
 )
+from app.services import routing, workload
 from app.services.functions import CATEGORY_TITLES, function_title
 from app.services.staffing import NormRule, OrgReport, build_report, collect_metrics
 
@@ -87,6 +90,84 @@ def load_reports(db: Session, org_ids: list[int] | None = None) -> list[OrgRepor
         )
         for org, municipality in orgs
     ]
+
+
+def load_sites(db: Session, org_ids: list[int] | None = None,
+               radius_m: float = workload.DEFAULT_RADIUS_M) -> dict:
+    """Отчёт о загрузке АУП и ВП по площадкам (см. services/workload.py)."""
+    if org_ids is not None and not org_ids:
+        return workload.analyze([], [], {}, [], radius_m=radius_m)
+
+    def scoped(query, column):
+        return query if org_ids is None else query.where(column.in_(org_ids))
+
+    orgs = {
+        org.id: (org, municipality)
+        for org, municipality in db.execute(
+            scoped(select(Organization, Municipality.name).join(Municipality), Organization.id)
+        )
+    }
+    enrollments = defaultdict(list)
+    for row in db.scalars(scoped(select(Enrollment), Enrollment.organization_id)):
+        enrollments[row.organization_id].append(row)
+
+    rows = db.scalars(scoped(select(Building), Building.organization_id).order_by(Building.id))
+    by_org = defaultdict(list)
+    buildings = []
+    for row in rows:
+        org, municipality = orgs[row.organization_id]
+        by_org[org.id].append(row)
+        buildings.append(workload.SiteBuilding(
+            id=row.id, org_id=org.id, org_name=org.name, org_type=org.org_type,
+            municipality_id=org.municipality_id, municipality=municipality, name=row.name,
+            area=float(row.area_sqm), floors=row.floors, address=row.address or org.address,
+            lat=None if row.latitude is None else float(row.latitude),
+            lon=None if row.longitude is None else float(row.longitude),
+            capacity=row.capacity, occupancy=row.occupancy,
+        ))
+
+    staff_query = select(
+        StaffPosition.organization_id,
+        StaffPosition.building_id,
+        StaffPosition.function_code,
+        func.min(StaffPosition.category).label("category"),
+        func.sum(StaffPosition.rate).label("rate"),
+        func.sum(StaffPosition.monthly_pay).label("pay"),
+        func.sum(
+            case((StaffPosition.employee_ref.is_(None), StaffPosition.rate), else_=0)
+        ).label("vacant_rate"),
+        func.count(StaffPosition.employee_ref).label("people"),
+    ).where(StaffPosition.category.in_(workload.CATEGORIES)).group_by(
+        StaffPosition.organization_id, StaffPosition.building_id, StaffPosition.function_code
+    )
+    staff = [
+        workload.StaffRow(org_id=row.organization_id, building_id=row.building_id,
+                          function_code=row.function_code, category=row.category,
+                          rate=float(row.rate), pay=float(row.pay),
+                          vacant_rate=float(row.vacant_rate), people=row.people)
+        for row in db.execute(scoped(staff_query, StaffPosition.organization_id))
+    ]
+
+    # Заявки за квартал — косвенный признак того, сколько работы у хозяйственной службы
+    since = datetime.now(UTC) - timedelta(days=90)
+    requests_query = (
+        select(IncomingRequest.building_id, IncomingRequest.topic, func.count())
+        .where(IncomingRequest.building_id.is_not(None), IncomingRequest.created_at >= since)
+        .group_by(IncomingRequest.building_id, IncomingRequest.topic)
+    )
+    requests: dict[tuple[int, str], int] = defaultdict(int)
+    for building_id, topic, count in db.execute(
+        scoped(requests_query, IncomingRequest.organization_id)
+    ):
+        function_code = routing.TOPICS[topic].function_code if topic in routing.TOPICS else None
+        if function_code:
+            requests[building_id, function_code] += count
+
+    metrics = {org_id: collect_metrics(enrollments[org_id], by_org[org_id]) for org_id in orgs}
+    return workload.analyze(
+        buildings, staff, metrics, load_rules(db), radius_m=radius_m,
+        payroll_tax_rate=get_settings().payroll_tax_rate, requests=dict(requests),
+    )
 
 
 def summarize(reports: list[OrgReport]) -> dict:

@@ -3,6 +3,7 @@
 import pytest
 
 from app.services import llm, routing
+from app.services.assistant import foreign_references
 from app.services.forecast import linear_trend
 from app.services.llm import ThinkFilter, _with_no_think
 from app.services.rag import CHUNK_SIZE, hashing_embedding, split_into_chunks
@@ -68,6 +69,11 @@ def test_local_model_is_required_for_sensitive_requests(monkeypatch):
         ("На основании чего рассчитан норматив по уборщикам?", "norms"),
         ("Не могу войти в систему, пароль не подходит", "technical"),
         ("Поздравляем с праздником", "other"),
+        ("Починить мебель: в кабинете 12 сломалась парта", "furniture"),
+        ("Течёт кран в туалете на втором этаже", "plumbing"),
+        ("Не горят лампы в коридоре, искрит розетка", "electrical"),
+        ("Не печатает принтер в учительской", "it"),
+        ("Убрать снег у запасного выхода", "cleaning"),
     ],
 )
 def test_request_topic_by_rules(text, topic):
@@ -103,3 +109,27 @@ def test_linear_trend():
 
 def test_trend_with_single_point_is_flat():
     assert linear_trend([(2025, 300)]) == (0.0, 300)
+
+
+CONTEXT = ("Из базы знаний. Учитель-логопед: одна штатная единица на 6–12 обучающихся с ОВЗ — "
+           "Приказ Минпросвещения России от 22.03.2021 № 115. Учреждение: СОШ № 5.")
+
+
+def test_answer_within_context_raises_no_warning():
+    answer = ("По приказу Минпросвещения № 115 на 12 детей с ОВЗ положена одна ставка логопеда. "
+              "В СОШ № 5 их 14, значит нужно 1,25 ставки.")
+    assert foreign_references(answer, CONTEXT) == []
+
+
+@pytest.mark.parametrize(
+    ("answer", "fragment"),
+    [
+        ("Это следует из приказа Минобрнауки № 1601 о норме часов.", "№ 1601"),
+        ("Согласно статье 333 Трудового кодекса, норма не превышает 36 часов.", "Трудового"),
+        ("Требования к уборке установлены СанПиН 2.4.3648-20.", "СанПиН"),
+        ("Подробнее см. https://minobr.example/norms и 273-ФЗ.", "https://"),
+    ],
+)
+def test_references_outside_context_are_reported(answer, fragment):
+    found = foreign_references(answer, CONTEXT)
+    assert any(fragment in item for item in found)

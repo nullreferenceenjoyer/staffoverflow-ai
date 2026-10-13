@@ -1,4 +1,4 @@
-"""Импорт штатных расписаний и контингента из CSV/XLSX.
+"""Импорт штатных расписаний, контингента и зданий из CSV/XLSX.
 
 Формат подогнан под типовые выгрузки: названия колонок могут быть русскими
 (как в отчётах 1С:ЗУП) или английскими. Персональные данные отсекаются здесь же:
@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Enrollment, Level, Organization, StaffPosition, StudyForm
+from app.models import Building, Enrollment, Level, Organization, StaffPosition, StudyForm
 from app.services.functions import BY_CODE, classify_title
 
 STAFF_COLUMNS = {
@@ -34,6 +34,25 @@ STAFF_COLUMNS = {
     "weekly_hours": ("weekly_hours", "часов в неделю", "нагрузка", "недельная нагрузка"),
     "duties": ("duties", "функции", "обязанности", "должностные обязанности"),
     "function_code": ("function_code", "код функции"),
+    "building": ("building", "корпус", "здание", "место работы", "адрес места работы",
+                 "код объекта ргис"),
+}
+
+# Выгрузка реестра объектов из РГИС: одна строка — одно здание
+BUILDING_COLUMNS = {
+    "organization": STAFF_COLUMNS["organization"] + ("правообладатель", "балансодержатель"),
+    "name": ("name", "корпус", "здание", "наименование", "наименование объекта", "объект"),
+    "rgis_id": ("rgis_id", "код объекта ргис", "код ргис", "идентификатор", "id объекта",
+                "кадастровый номер"),
+    "address": ("address", "адрес", "адрес объекта", "местоположение"),
+    "latitude": ("latitude", "широта", "lat"),
+    "longitude": ("longitude", "долгота", "lon", "lng"),
+    "area_sqm": ("area_sqm", "площадь", "общая площадь", "площадь, м2", "площадь, кв. м"),
+    "floors": ("floors", "этажность", "этажей", "количество этажей"),
+    "capacity": ("capacity", "проектная мощность", "мощность", "мощность, мест", "мест"),
+    "occupancy": ("occupancy", "наполняемость", "фактическая наполняемость",
+                  "фактически обучается"),
+    "year_built": ("year_built", "год постройки", "год ввода", "год ввода в эксплуатацию"),
 }
 
 ENROLLMENT_COLUMNS = {
@@ -155,6 +174,7 @@ def import_staffing(db: Session, rows: list[dict[str, str]], *, allowed_org_ids:
     result = ImportResult()
     columns = _map_columns(list(rows[0]), STAFF_COLUMNS, ("organization", "title", "rate"), result)
     organizations = _find_organizations(db, allowed_org_ids)
+    buildings = _find_buildings(db)
 
     positions: list[StaffPosition] = []
     touched: set[int] = set()
@@ -185,6 +205,8 @@ def import_staffing(db: Session, rows: list[dict[str, str]], *, allowed_org_ids:
         employee = cell("employee")
         positions.append(StaffPosition(
             organization_id=org.id,
+            # Корпус ищем по названию, адресу или коду РГИС; не нашли — ставка без привязки
+            building_id=buildings.get((org.id, _key(cell("building")))),
             department=cell("department") or None,
             title=title[:200],
             category=function.category.value,
@@ -201,6 +223,83 @@ def import_staffing(db: Session, rows: list[dict[str, str]], *, allowed_org_ids:
         db.execute(delete(StaffPosition).where(StaffPosition.organization_id.in_(touched)))
     db.add_all(positions)
     result.imported = len(positions)
+    result.organizations = len(touched)
+    return result
+
+
+def _key(value: str) -> str:
+    return " ".join(value.lower().replace("ё", "е").split())
+
+
+def _find_buildings(db: Session) -> dict[tuple[int, str], int]:
+    index = {}
+    for building in db.scalars(select(Building)):
+        for value in (building.name, building.address, building.rgis_id):
+            if value:
+                index[building.organization_id, _key(value)] = building.id
+    return index
+
+
+def import_buildings(db: Session, rows: list[dict[str, str]], *,
+                     allowed_org_ids: set[int] | None) -> ImportResult:
+    """Загружает реестр зданий из РГИС. Здание узнаётся по коду объекта, а если кода
+    нет — по названию внутри учреждения; найденное обновляется, остальные добавляются."""
+    result = ImportResult()
+    columns = _map_columns(list(rows[0]), BUILDING_COLUMNS, ("organization", "address"), result)
+    organizations = _find_organizations(db, allowed_org_ids)
+    by_code = {b.rgis_id: b for b in db.scalars(select(Building)) if b.rgis_id}
+    touched: set[int] = set()
+
+    for number, row in enumerate(rows, start=2):
+        def cell(name: str, row=row) -> str:
+            return row.get(columns.get(name, ""), "") or ""
+
+        org = organizations.get(cell("organization").lower())
+        if org is None:
+            result.error(number, f"учреждение «{cell('organization')}» не найдено или недоступно")
+            continue
+        try:
+            values = {
+                "address": cell("address")[:300] or None,
+                "latitude": _number(cell("latitude")) if cell("latitude") else None,
+                "longitude": _number(cell("longitude")) if cell("longitude") else None,
+                "floors": int(_number(cell("floors"))) if cell("floors") else None,
+                "capacity": int(_number(cell("capacity"))) if cell("capacity") else None,
+                "occupancy": int(_number(cell("occupancy"))) if cell("occupancy") else None,
+                "year_built": int(_number(cell("year_built"))) if cell("year_built") else None,
+                "area_sqm": _number(cell("area_sqm")) if cell("area_sqm") else None,
+            }
+        except ValueError as exc:
+            result.error(number, str(exc))
+            continue
+        if (values["latitude"] is None) != (values["longitude"] is None):
+            result.error(number, "координаты указаны не полностью")
+            continue
+
+        code = cell("rgis_id") or None
+        name = cell("name")[:200] or values["address"] or "Здание"
+        building = by_code.get(code) if code else None
+        if building is not None and building.organization_id != org.id:
+            result.error(number, f"объект {code} уже числится за другим учреждением")
+            continue
+        if building is None:
+            building = next((b for b in org.buildings if _key(b.name) == _key(name)), None)
+        if building is None:
+            if values["area_sqm"] is None:
+                result.error(number, "для нового здания нужна площадь")
+                continue
+            building = Building(organization_id=org.id, name=name)
+            org.buildings.append(building)
+        if code:
+            building.rgis_id = code
+            by_code[code] = building
+        # Пустые ячейки не затирают то, что уже введено вручную
+        for key, value in values.items():
+            if value is not None:
+                setattr(building, key, value)
+        touched.add(org.id)
+        result.imported += 1
+
     result.organizations = len(touched)
     return result
 

@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 
 import { api, Role, Task, WorkflowStep, WorkflowTemplate } from '../api'
 import { useUser } from '../App'
+import { Gantt, GanttItem } from '../components/Gantt'
+import { Icon } from '../components/icons'
 import { ActionButton, Async, Card, Empty, Field, Form, Modal, Page, Tabs } from '../components/ui'
 import { canPlan, fmtDate, ROLE_LABELS, TASK_STATUS, useApi } from '../lib'
 
@@ -58,7 +60,10 @@ function Board() {
             <div className="board">
               {COLUMNS.map((status) => (
                 <div key={status} className="board-column">
-                  <h3>{TASK_STATUS[status]}</h3>
+                  <h3>
+                    {TASK_STATUS[status]}{' '}
+                    <span>{visible.filter((t) => t.status === status).length}</span>
+                  </h3>
                   {visible
                     .filter((t) => t.status === status)
                     .map((task) => {
@@ -67,10 +72,15 @@ function Board() {
                       const allowed = canPlan(user) || task.assignee_role === user.role
                       return (
                         <div key={task.id} className={`task ${isOverdue(task) ? 'overdue' : ''}`}>
-                          <div>{task.title}</div>
-                          <div className="muted">
-                            {ROLE_LABELS[task.assignee_role]} · срок {fmtDate(task.due_date)}
-                            {isOverdue(task) && ' · просрочено'}
+                          <div className="task-title">{task.title}</div>
+                          <div className="task-meta">
+                            <span>
+                              <Icon name="user" size={13} /> {ROLE_LABELS[task.assignee_role]}
+                            </span>
+                            <span className={isOverdue(task) ? 'late' : ''}>
+                              <Icon name="clock" size={13} /> {fmtDate(task.due_date)}
+                              {isOverdue(task) && ' · просрочено'}
+                            </span>
                           </div>
                           {next && allowed && (
                             <ActionButton className="small" onClick={() => move(task, next[0])}>
@@ -90,6 +100,58 @@ function Board() {
               </p>
             )}
           </>
+        )
+      }}
+    </Async>
+  )
+}
+
+const DAY = 86_400_000
+
+/** Все задачи на одной шкале: цепочки сценариев идут лесенкой, шаг за шагом. */
+function Timeline() {
+  const state = useApi<Task[]>('/tasks')
+  return (
+    <Async state={state}>
+      {(tasks) => {
+        const items: GanttItem[] = tasks
+          .filter((t) => t.due_date)
+          .sort(
+            (a, b) => (a.run_id ?? '').localeCompare(b.run_id ?? '') || a.step_index - b.step_index,
+          )
+          .map((task) => {
+            const end = new Date(task.due_date as string)
+            const start = new Date(end.getTime() - (task.duration_days ?? 3) * DAY)
+            const chain = tasks.filter((t) => t.run_id && t.run_id === task.run_id)
+            return {
+              id: task.id,
+              // В названии шага после тире идёт проект — он уже вынесен в заголовок группы
+              label: task.title.split(' — ')[0],
+              note: ROLE_LABELS[task.assignee_role],
+              group: task.run_id
+                ? (chain[0].title.split(' — ')[1] ?? 'Сценарий без проекта')
+                : 'Отдельные задачи',
+              start,
+              end,
+              progress: task.status === 'done' ? 1 : task.status === 'in_progress' ? 0.5 : 0,
+              tone: isOverdue(task)
+                ? 'red'
+                : task.status === 'done'
+                  ? 'green'
+                  : task.status === 'waiting'
+                    ? 'gray'
+                    : 'blue',
+              tip: TASK_STATUS[task.status] + (isOverdue(task) ? ', просрочено' : ''),
+            }
+          })
+        return (
+          <Card title="Диаграмма Ганта">
+            <p className="card-sub">
+              Шаги сценариев по срокам. Серые ждут предыдущего шага, зелёные выполнены, красные
+              просрочены.
+            </p>
+            <Gantt items={items} empty="Задач со сроками нет" />
+          </Card>
         )
       }}
     </Async>
@@ -267,7 +329,7 @@ function Templates() {
 }
 
 export function Workflow() {
-  const [tab, setTab] = useState<'board' | 'templates'>('board')
+  const [tab, setTab] = useState<'board' | 'gantt' | 'templates'>('board')
   return (
     <Page
       title="Задачи"
@@ -278,10 +340,11 @@ export function Workflow() {
         onChange={setTab}
         tabs={[
           ['board', 'Доска задач'],
+          ['gantt', 'Диаграмма Ганта'],
           ['templates', 'Конструктор сценариев'],
         ]}
       />
-      {tab === 'board' ? <Board /> : <Templates />}
+      {tab === 'board' ? <Board /> : tab === 'gantt' ? <Timeline /> : <Templates />}
     </Page>
   )
 }

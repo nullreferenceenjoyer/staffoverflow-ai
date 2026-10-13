@@ -32,6 +32,9 @@ x-backend: &backend
     EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
     TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:-}
+    SITE_RADIUS_M: ${SITE_RADIUS_M:-300}
+    REQUEST_WARN_HOURS: ${REQUEST_WARN_HOURS:-24}
+    REQUEST_AUTOCLOSE_DAYS: ${REQUEST_AUTOCLOSE_DAYS:-3}
   volumes:
     - storage:/data/storage
     - ./seed:/seed:ro

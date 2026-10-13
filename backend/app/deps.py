@@ -21,6 +21,8 @@ EDITORS = (Role.admin, Role.regional_analyst, Role.municipal_specialist, Role.di
 PLANNERS = (Role.admin, Role.regional_analyst, Role.municipal_specialist)
 # Кто утверждает проекты и правит нормативы
 APPROVERS = (Role.admin, Role.regional_analyst)
+# Кому доступны только заявки: штатные расписания и аналитика им не показываются
+SERVICE_ROLES = (Role.executor, Role.employee)
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
@@ -39,6 +41,12 @@ def require_roles(*roles: Role) -> Callable[..., User]:
         return user
 
     return checker
+
+
+def require_analytics_access(user: User = Depends(get_current_user)) -> User:
+    if user.role in SERVICE_ROLES:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Раздел недоступен для вашей роли")
+    return user
 
 
 class Scope:

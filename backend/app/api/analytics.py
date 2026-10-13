@@ -6,9 +6,10 @@ from fastapi.responses import Response
 from sqlalchemy import func, select
 
 from app.api.organizations import report_summary
+from app.config import get_settings
 from app.deps import Scope, get_scope
 from app.models import Category, Project, Task, TaskStatus
-from app.services import analytics, centralization
+from app.services import analytics, centralization, helpdesk
 from app.services.functions import CATEGORY_TITLES
 
 router = APIRouter(tags=["analytics"])
@@ -31,8 +32,19 @@ def dashboard(municipality_id: int | None = None, scope: Scope = Depends(get_sco
         .where(Task.due_date < func.current_date())
     )
     top = sorted(reports, key=lambda r: r.saving_potential_year, reverse=True)[:8]
+    sites = analytics.load_sites(scope.db, scope.org_ids(municipality_id),
+                                 get_settings().site_radius_m)
+    requests = helpdesk.stats(list(scope.db.scalars(helpdesk.visible(scope))))
     return {
         **summary,
+        "workload": {
+            **sites["totals"],
+            "by_function": sites["by_function"][:8],
+            "findings": [f for f in sites["findings"] if f["verdict"] != "overload"][:5],
+        },
+        "requests": {key: requests[key] for key in (
+            "active", "overdue", "unassigned", "waiting_confirmation", "in_time_pct",
+            "avg_hours", "by_status", "flow")},
         "centralization": {
             "stages": scenario["stages"],
             "released_total": scenario["released_total"],
@@ -88,6 +100,34 @@ def duplicates(municipality_id: int | None = None, scope: Scope = Depends(get_sc
 @router.get("/analytics/inefficiency")
 def inefficiency(municipality_id: int | None = None, scope: Scope = Depends(get_scope)):
     return analytics.find_inefficient_positions(scope.db, scope.org_ids(municipality_id))
+
+
+@router.get("/analytics/workload")
+def workload_report(municipality_id: int | None = None, radius: int | None = None,
+                    scope: Scope = Depends(get_scope)):
+    """Загрузка АУП и ВП по площадкам — группам корпусов, стоящих рядом."""
+    radius_m = get_settings().site_radius_m if radius is None else max(0, min(radius, 5000))
+    return analytics.load_sites(scope.db, scope.org_ids(municipality_id), radius_m)
+
+
+@router.get("/analytics/workload.csv")
+def workload_csv(municipality_id: int | None = None, radius: int | None = None,
+                 scope: Scope = Depends(get_scope)):
+    report = workload_report(municipality_id, radius, scope)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";")
+    writer.writerow(["Муниципалитет", "Площадка", "Функция", "Занято, ст.", "Сотрудников",
+                     "Объём работы, ст.", "Загрузка, %", "Достаточно, ст.", "Можно сократить, ст.",
+                     "Экономия ФОТ за год, руб.", "Рекомендация"])
+    for row in report["findings"]:
+        writer.writerow([row["municipality"], row["site"], row["title"], row["actual"],
+                         row["people"], row["volume"], row["load_pct"], row["required"],
+                         max(row["excess"], 0), row["saving_year"], row["recommendation"]])
+    return Response(
+        content="﻿" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="workload.csv"'},
+    )
 
 
 @router.get("/analytics/centralization")

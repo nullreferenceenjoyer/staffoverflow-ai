@@ -4,9 +4,26 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
 
-from app.models import Category, Level, OrgType, ProjectStatus, Role, StudyForm, TaskStatus
+from app.models import (
+    Category,
+    Level,
+    OrgType,
+    ProjectStatus,
+    RequestKind,
+    RequestStatus,
+    Role,
+    StudyForm,
+    TaskStatus,
+)
 
 # В БД числа лежат в Decimal, а в JSON отдаём обычные числа, а не строки
 Num = Annotated[Decimal, PlainSerializer(float, return_type=float, when_used="json")]
@@ -74,6 +91,12 @@ class BuildingIn(BaseModel):
     floors: int = Field(1, ge=1, le=30)
     year_built: int | None = Field(None, ge=1800, le=2100)
     condition: str = "satisfactory"
+    address: str | None = Field(None, max_length=300)
+    latitude: Num | None = Field(None, ge=-90, le=90)
+    longitude: Num | None = Field(None, ge=-180, le=180)
+    capacity: int | None = Field(None, ge=1, le=20000)
+    occupancy: int | None = Field(None, ge=0, le=20000)
+    rgis_id: str | None = Field(None, max_length=64)
 
 
 class BuildingOut(ORMModel, BuildingIn):
@@ -103,6 +126,7 @@ class PositionIn(BaseModel):
     # Если не задано, функция определяется по названию должности
     function_code: str | None = None
     is_vacant: bool = False
+    building_id: int | None = None
 
 
 class PositionOut(ORMModel):
@@ -116,6 +140,7 @@ class PositionOut(ORMModel):
     weekly_hours: Num | None
     duties: str | None
     employee_ref: str | None
+    building_id: int | None
 
 
 class NormIn(BaseModel):
@@ -186,7 +211,7 @@ class ProjectDetail(ProjectOut):
 
 
 class ProjectGenerate(BaseModel):
-    kind: str = Field(pattern="^(normalization|centralization)$")
+    kind: str = Field(pattern="^(normalization|centralization|workload)$")
     organization_id: int | None = None
     municipality_id: int | None = None
 
@@ -246,6 +271,7 @@ class TaskOut(ORMModel):
     assignee_id: int | None
     municipality_id: int | None
     status: TaskStatus
+    duration_days: int
     due_date: date | None
     completed_at: datetime | None
 
@@ -254,31 +280,45 @@ class NotificationOut(ORMModel):
     id: int
     text: str
     task_id: int | None
+    request_id: int | None
     created_at: datetime
     read_at: datetime | None
 
 
 class RequestIn(BaseModel):
-    text: str = Field(min_length=10, max_length=4000)
+    title: str = Field("", max_length=200)
+    text: str = Field("", max_length=4000)
+    kind: RequestKind = RequestKind.planned
+    # Не задана — тему определит система по тексту
+    topic: str | None = None
     organization_id: int | None = None
+    building_id: int | None = None
+    location: str | None = Field(None, max_length=200)
+
+    @model_validator(mode="after")
+    def _has_content(self):
+        self.title, self.text = self.title.strip(), self.text.strip()
+        if len(self.title or self.text) < 5:
+            raise ValueError("Опишите, что нужно сделать")
+        return self
 
 
 class RequestUpdate(BaseModel):
-    status: str | None = Field(None, pattern="^(new|in_progress|closed)$")
-    resolution: str | None = None
-    routed_role: Role | None = None
+    assignee_id: int | None = None
+    due_at: datetime | None = None
+    kind: RequestKind | None = None
+    topic: str | None = None
 
 
-class RequestOut(ORMModel):
-    id: int
-    organization_id: int
-    text: str
-    topic: str
-    routed_role: Role
-    classified_by: str
-    status: str
-    resolution: str | None
-    created_at: datetime
+class RequestStatusChange(BaseModel):
+    status: RequestStatus
+    comment: str | None = Field(None, max_length=4000)
+
+
+class RequestComment(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    # Вопрос заявителю: заявка встаёт на паузу до его ответа
+    needs_reply: bool = False
 
 
 class ChatMessage(BaseModel):

@@ -163,4 +163,5 @@ def assistant_block(db: Session, scope: Scope):
     body = table(["Категория", "Ставок на старте", "Сейчас", "План сокращения", "Сокращено",
                   "Избыток по расчёту", "из него вакансии"], rows)
     return Block(f"Паспорт проекта: {program.municipality.name}",
-                 f"{head}\n\n{body}\n\nДорожная карта: {milestones}")
+                 f"{head}\n\n{body}\n\nДорожная карта: {milestones}",
+                 source="База данных системы: паспорт проекта")

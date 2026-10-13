@@ -29,6 +29,8 @@ class Role(enum.StrEnum):
     municipal_specialist = "municipal_specialist"
     director = "director"
     observer = "observer"
+    executor = "executor"  # хозяйственная служба учреждения: исполняет заявки
+    employee = "employee"  # сотрудник учреждения: подаёт заявки и видит только свои
 
 
 class OrgType(enum.StrEnum):
@@ -63,6 +65,22 @@ class ProjectStatus(enum.StrEnum):
     approved = "approved"
     rejected = "rejected"
     implemented = "implemented"
+
+
+class RequestStatus(enum.StrEnum):
+    new = "new"  # исполнитель не найден, ждёт распределения
+    assigned = "assigned"
+    in_progress = "in_progress"
+    on_hold = "on_hold"  # исполнитель ждёт ответа заявителя, срок не идёт
+    done = "done"  # выполнена, ждёт подтверждения заявителя
+    closed = "closed"
+    rejected = "rejected"
+
+
+class RequestKind(enum.StrEnum):
+    planned = "planned"
+    urgent = "urgent"
+    emergency = "emergency"
 
 
 class TaskStatus(enum.StrEnum):
@@ -119,6 +137,13 @@ class Building(Base):
     floors: Mapped[int] = mapped_column(default=1)
     year_built: Mapped[int | None]
     condition: Mapped[str] = mapped_column(String(32), default="satisfactory")
+    # Сведения из РГИС: по адресу и координатам определяется, какие корпуса стоят рядом
+    address: Mapped[str | None] = mapped_column(String(300))
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    capacity: Mapped[int | None]  # проектная мощность, мест
+    occupancy: Mapped[int | None]  # сколько детей фактически занимается в корпусе
+    rgis_id: Mapped[str | None] = mapped_column(String(64), unique=True)
 
 
 class Enrollment(Base):
@@ -151,6 +176,10 @@ class StaffPosition(Base):
     organization_id: Mapped[int] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE")
     )
+    # Корпус, где фактически работает ставка. None — не привязана (считается за главным)
+    building_id: Mapped[int | None] = mapped_column(
+        ForeignKey("buildings.id", ondelete="SET NULL"), index=True
+    )
     department: Mapped[str | None] = mapped_column(String(200))
     title: Mapped[str] = mapped_column(String(200))
     category: Mapped[str] = mapped_column(_str_enum(Category))
@@ -161,6 +190,8 @@ class StaffPosition(Base):
     employee_ref: Mapped[str | None] = mapped_column(String(32))
     weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
     duties: Mapped[str | None] = mapped_column(Text)
+
+    building: Mapped[Building | None] = relationship()
 
 
 class KnowledgeDocument(Base):
@@ -403,6 +434,9 @@ class Notification(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     text: Mapped[str] = mapped_column(Text)
     task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("incoming_requests.id", ondelete="CASCADE")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_to_telegram: Mapped[bool] = mapped_column(default=False)
@@ -410,24 +444,64 @@ class Notification(Base):
 
 
 class IncomingRequest(Base):
-    """Обращение от ОУ («нужна ставка логопеда»), которое надо направить специалисту."""
+    """Заявка: от «починить мебель в кабинете» до «нужна ставка логопеда»."""
 
     __tablename__ = "incoming_requests"
+    __table_args__ = (Index("ix_requests_status_due", "status", "due_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), index=True
     )
+    building_id: Mapped[int | None] = mapped_column(
+        ForeignKey("buildings.id", ondelete="SET NULL")
+    )
+    location: Mapped[str | None] = mapped_column(String(200))  # кабинет, этаж
     author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    title: Mapped[str] = mapped_column(String(200))
     text: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(_str_enum(RequestKind), default=RequestKind.planned)
     topic: Mapped[str] = mapped_column(String(40))
     routed_role: Mapped[str] = mapped_column(_str_enum(Role))
-    classified_by: Mapped[str] = mapped_column(String(8))  # llm | rules
-    status: Mapped[str] = mapped_column(String(16), default="new")  # new | in_progress | closed
+    assignee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    classified_by: Mapped[str] = mapped_column(String(8))  # llm | rules | manual
+    status: Mapped[str] = mapped_column(_str_enum(RequestStatus), default=RequestStatus.new)
     resolution: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Когда заявку поставили на паузу: при возобновлении срок сдвигается на время ожидания
+    hold_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_reminder_on: Mapped[date | None] = mapped_column(Date)
 
     organization: Mapped[Organization] = relationship()
+    building: Mapped[Building | None] = relationship()
+    author: Mapped[User | None] = relationship(foreign_keys=[author_id])
+    assignee: Mapped[User | None] = relationship(foreign_keys=[assignee_id])
+    events: Mapped[list[RequestEvent]] = relationship(
+        cascade="all, delete-orphan", order_by="RequestEvent.id"
+    )
+
+
+class RequestEvent(Base):
+    """Лента заявки: комментарии людей и записи о том, что изменилось."""
+
+    __tablename__ = "request_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("incoming_requests.id", ondelete="CASCADE"), index=True
+    )
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(16))  # comment | status | assignee | deadline
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    author: Mapped[User | None] = relationship()
 
 
 class AuditLog(Base):

@@ -76,10 +76,19 @@ export async function download(path: string, filename: string, query?: RequestOp
   URL.revokeObjectURL(url)
 }
 
+export interface ChatSource {
+  kind: 'database' | 'document'
+  title: string
+  ref: string | null
+  id?: number
+  is_summary?: boolean
+}
+
 export type ChatEvent =
   | { type: 'delta'; text: string }
-  | { type: 'data'; title: string; markdown: string }
-  | { type: 'tool'; name: string; arguments: Record<string, unknown> }
+  | { type: 'data'; title: string; markdown: string; source: string }
+  | { type: 'sources'; items: ChatSource[] }
+  | { type: 'warning'; message: string }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -115,7 +124,14 @@ export async function streamChat(
 
 // --- типы ответов API ---
 
-export type Role = 'admin' | 'regional_analyst' | 'municipal_specialist' | 'director' | 'observer'
+export type Role =
+  | 'admin'
+  | 'regional_analyst'
+  | 'municipal_specialist'
+  | 'director'
+  | 'observer'
+  | 'executor'
+  | 'employee'
 export type Category = 'teaching' | 'admin' | 'support' | 'medical'
 
 export interface User {
@@ -189,6 +205,18 @@ export interface Dashboard {
     saving: number
   }[]
   centralization: { stages: Stage[]; released_total: number; saving_year: number }
+  workload: WorkloadTotals & { by_function: FunctionLoad[]; findings: Finding[] }
+  requests: Pick<
+    RequestStats,
+    | 'active'
+    | 'overdue'
+    | 'unassigned'
+    | 'waiting_confirmation'
+    | 'in_time_pct'
+    | 'avg_hours'
+    | 'by_status'
+    | 'flow'
+  >
   projects_by_status: Record<string, number>
   overdue_tasks: number | null
   top_organizations: OrgSummary[]
@@ -214,6 +242,12 @@ export interface Building {
   floors: number
   year_built: number | null
   condition: string
+  address: string | null
+  latitude: number | null
+  longitude: number | null
+  capacity: number | null
+  occupancy: number | null
+  rgis_id: string | null
 }
 
 export interface Enrollment {
@@ -245,6 +279,7 @@ export interface Position {
   monthly_pay: number
   weekly_hours: number | null
   employee_ref: string | null
+  building_id: number | null
 }
 
 export interface Deviation {
@@ -371,6 +406,7 @@ export interface Task {
   status: 'waiting' | 'todo' | 'in_progress' | 'done'
   due_date: string | null
   completed_at: string | null
+  duration_days?: number
 }
 
 export interface KnowledgeDoc {
@@ -394,16 +430,185 @@ export interface SearchHit {
   norms: { id: number; code: string; title: string }[]
 }
 
+export type RequestStatus =
+  'new' | 'assigned' | 'in_progress' | 'on_hold' | 'done' | 'closed' | 'rejected'
+export type RequestKind = 'planned' | 'urgent' | 'emergency'
+
+export interface Person {
+  id: number
+  name: string
+  role: Role
+}
+
 export interface OrgRequest {
   id: number
-  organization: string
+  title: string
   text: string
+  kind: RequestKind
+  topic: string
   topic_title: string
+  status: RequestStatus
+  organization_id: number
+  organization: string
+  building_id: number | null
+  building: string | null
+  location: string | null
+  author: Person | null
+  assignee: Person | null
   routed_role: Role
-  classified_by: 'llm' | 'rules'
-  status: 'new' | 'in_progress' | 'closed'
-  resolution: string | null
+  classified_by: 'llm' | 'rules' | 'manual'
   created_at: string
+  due_at: string | null
+  started_at: string | null
+  resolved_at: string | null
+  closed_at: string | null
+  overdue: boolean
+  resolution: string | null
+  comments: number
+  can_manage: boolean
+  is_author: boolean
+  actions: RequestStatus[]
+  events?: {
+    id: number
+    kind: 'comment' | 'status' | 'assignee' | 'deadline'
+    text: string
+    created_at: string
+    author: string | null
+  }[]
+  assignable?: Person[]
+}
+
+export interface RequestMeta {
+  topics: { code: string; title: string; days: number; role: Role }[]
+  kinds: { code: RequestKind; title: string; hours: number | null }[]
+  statuses: { code: RequestStatus; title: string }[]
+  organizations: { id: number; name: string; buildings: { id: number; name: string }[] }[]
+}
+
+export interface RequestStats {
+  days: number
+  total: number
+  active: number
+  unassigned: number
+  overdue: number
+  waiting_confirmation: number
+  resolved: number
+  in_time_pct: number | null
+  avg_hours: number | null
+  by_status: { status: RequestStatus; title: string; count: number }[]
+  by_kind: { kind: RequestKind; title: string; count: number }[]
+  by_topic: {
+    topic: string
+    title: string
+    total: number
+    active: number
+    overdue: number
+    avg_hours: number | null
+  }[]
+  by_assignee: { id: number | null; name: string; active: number; overdue: number; done: number }[]
+  by_organization: { id: number; name: string; total: number; active: number; overdue: number }[]
+  flow: { date: string; created: number; closed: number }[]
+}
+
+export type Verdict = 'duplicate' | 'idle' | 'overload' | 'underused' | 'ok'
+
+export interface FunctionLoad {
+  function_code: string
+  title: string
+  category: Category
+  actual: number
+  volume: number
+  required: number
+  excess: number
+  load_pct: number | null
+  saving_year: number
+  sites?: number
+}
+
+export interface SiteFunction extends FunctionLoad {
+  organization: string | null
+  people: number
+  vacant: number
+  verdict: Verdict
+  requests: number
+  recommendation: string | null
+  by_building: { building_id: number; name: string; actual: number; volume: number }[]
+}
+
+export interface Finding {
+  site_id: number
+  site: string
+  municipality: string
+  function_code: string | null
+  title: string
+  organization: string | null
+  category: Category | null
+  actual: number
+  people: number
+  vacant: number
+  volume: number
+  required: number | null
+  load_pct: number | null
+  excess: number
+  verdict: Verdict
+  saving_year: number
+  recommendation: string
+}
+
+export interface Site {
+  id: number
+  name: string
+  municipality_id: number
+  municipality: string
+  organizations: number
+  span_m: number | null
+  students: number
+  capacity: number | null
+  occupancy_pct: number | null
+  actual: number
+  volume: number
+  load_pct: number | null
+  excess: number
+  vacant_in_excess: number
+  saving_year: number
+  buildings: {
+    id: number
+    organization_id: number
+    organization: string
+    name: string
+    address: string | null
+    lat: number | null
+    lon: number | null
+    area: number
+    floors: number
+    capacity: number | null
+    students: number
+    occupancy_pct: number | null
+  }[]
+  functions: SiteFunction[]
+}
+
+export interface WorkloadTotals {
+  sites: number
+  shared_sites: number
+  buildings: number
+  without_location: number
+  unassigned_rate: number
+  actual: number
+  volume: number
+  load_pct: number | null
+  excess: number
+  vacant_in_excess: number
+  saving_year: number
+  flagged_sites: number
+}
+
+export interface WorkloadReport {
+  radius_m: number
+  totals: WorkloadTotals
+  by_function: FunctionLoad[]
+  findings: Finding[]
+  sites: Site[]
 }
 
 export interface Milestone {
@@ -470,6 +675,8 @@ export interface ProgramData {
 export interface Notification {
   id: number
   text: string
+  request_id: number | null
+  task_id: number | null
   created_at: string
   read_at: string | null
 }

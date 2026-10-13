@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { api, setToken, User } from '../api'
+import { Icon } from '../components/icons'
 import { Field, Form } from '../components/ui'
 
 export function Login({ onLogin }: { onLogin: (user: User) => void }) {
@@ -17,16 +18,27 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   return (
     <div className="login">
       <div className="login-about">
+        <span className="brand-mark">
+          <Icon name="users" />
+        </span>
         <h1>Кадровый потенциал ОУ</h1>
         <p>
-          Система сравнивает штатные расписания школ и детских садов с нормативами и показывает, где
-          ставок больше или меньше, чем нужно.
+          Показывает, сколько работы у управленческого и вспомогательного персонала школ и детских
+          садов на самом деле, и помогает довести решение до приказа.
         </p>
         <ul>
-          <li>считает нормативную численность по контингенту и зданиям;</li>
-          <li>находит избыток, нехватку и дублирование функций;</li>
-          <li>оценивает эффект от централизации бухгалтерии, кадров, уборки и охраны;</li>
-          <li>готовит проекты штатных расписаний и документы к ним.</li>
+          <li>
+            <Icon name="gauge" /> загрузка персонала по корпусам и площадкам
+          </li>
+          <li>
+            <Icon name="pin" /> адреса и мощность зданий из РГИС
+          </li>
+          <li>
+            <Icon name="inbox" /> заявки с ответственными и сроками
+          </li>
+          <li>
+            <Icon name="sparkles" /> помощник, который отвечает только по вашим данным
+          </li>
         </ul>
       </div>
       <div className="card login-card">

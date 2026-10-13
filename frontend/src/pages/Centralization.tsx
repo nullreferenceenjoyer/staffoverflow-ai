@@ -1,18 +1,10 @@
 import { Fragment, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 import { api, Municipality, Project, Scenario } from '../api'
 import { useUser } from '../App'
+import { AXIS, ChartTip, Legend, SERIES } from '../components/charts'
 import { ActionButton, Async, Card, Kpi, MunicipalitySelect, Page } from '../components/ui'
 import { canPlan, CATEGORY_LABELS, fmt, fmtMoney, useApi } from '../lib'
 
@@ -60,7 +52,7 @@ export function Centralization() {
         {(s) => (
           <>
             <div className="kpis">
-              <Kpi label="Учреждений в периметре" value={String(s.organizations)} />
+              <Kpi icon="building" label="Учреждений в периметре" value={String(s.organizations)} />
               <Kpi
                 label="Высвобождается"
                 value={`${fmt(s.released_total)} ст.`}
@@ -82,28 +74,39 @@ export function Centralization() {
                     { name: 'Общие центры и бригады', ...stageValues(s, 'centralized') },
                   ]}
                 >
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                  <YAxis tick={{ fontSize: 12 }} />
-                  <Tooltip formatter={(v: number) => fmt(v)} />
-                  <Legend />
+                  <CartesianGrid vertical={false} />
+                  <XAxis dataKey="name" {...AXIS} />
+                  <YAxis {...AXIS} width={44} />
+                  <Tooltip content={<ChartTip />} />
                   <Bar
                     isAnimationActive={false}
                     dataKey="admin"
                     name={CATEGORY_LABELS.admin}
                     stackId="a"
-                    fill="#8a5cd0"
+                    fill={SERIES[0]}
+                    stroke="var(--surface)"
+                    strokeWidth={2}
+                    maxBarSize={72}
                   />
                   <Bar
                     isAnimationActive={false}
                     dataKey="support"
                     name={CATEGORY_LABELS.support}
                     stackId="a"
-                    fill="#d9892b"
-                    radius={[3, 3, 0, 0]}
+                    fill={SERIES[1]}
+                    stroke="var(--surface)"
+                    strokeWidth={2}
+                    radius={[4, 4, 0, 0]}
+                    maxBarSize={72}
                   />
                 </BarChart>
               </ResponsiveContainer>
+              <Legend
+                items={[
+                  [CATEGORY_LABELS.admin, SERIES[0]],
+                  [CATEGORY_LABELS.support, SERIES[1]],
+                ]}
+              />
             </Card>
 
             <Card title="Функции, которые можно объединить">

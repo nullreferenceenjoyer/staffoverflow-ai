@@ -13,8 +13,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import random
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,7 +28,6 @@ from app.models import (
     Building,
     DigitalTool,
     Enrollment,
-    IncomingRequest,
     KnowledgeDocument,
     Milestone,
     Municipality,
@@ -35,6 +35,7 @@ from app.models import (
     Organization,
     Program,
     ProjectStatus,
+    RequestStatus,
     Role,
     StaffPosition,
     Task,
@@ -44,7 +45,7 @@ from app.models import (
 )
 from app.security import hash_password
 from app.seed_data import DIGITAL_TOOLS, KNOWLEDGE, NORMS, WORKFLOW_TEMPLATES
-from app.services import analytics, rag, routing, workflow
+from app.services import analytics, helpdesk, rag, workflow
 from app.services import projects as project_service
 from app.services.functions import BY_CODE
 from app.services.importer import pseudonymize
@@ -101,12 +102,78 @@ DUTIES = {
     "it": "Обслуживание компьютерной техники и сети, сопровождение электронного журнала.",
 }
 HOURS_PER_RATE = analytics.HOURS_PER_RATE
+STREETS = ["Школьная", "Садовая", "Центральная", "Молодёжная", "Лесная", "Советская",
+           "Новая", "Первомайская", "Заводская", "Спортивная", "Парковая", "Мира"]
+# Функции, которые привязаны к зданию: такие ставки раскладываются по корпусам
+SITE_BOUND = ("cleaning", "security", "janitor", "maintenance", "cloakroom", "kitchen",
+              "assistant_educator", "lab_assistant")
+# «Свой» персонал, который заводят во втором корпусе, хотя главный стоит через двор
+EXTRA_STAFF = [("facility_manager", 1), ("clerk", 1), ("cleaning", 1), ("maintenance", 1),
+               ("clerk", 0.5), ("cleaning", 1)]
+
+# (заголовок, подробности, тема, срочность)
 REQUESTS = [
-    "Просим выделить дополнительную ставку учителя-логопеда: в этом году в первые классы "
-    "пришло 14 детей с заключениями ПМПК.",
-    "В карточке учреждения неверно указана площадь второго корпуса, просим исправить данные.",
-    "На основании чего рассчитывается норматив по уборщикам служебных помещений?",
+    ("Починить парту в кабинете 12", "Сломалась ножка у парты в третьем ряду, качается.",
+     "furniture", "planned"),
+    ("Отремонтировать дверцу шкафа", "В учительской отвалилась дверца книжного шкафа.",
+     "furniture", "planned"),
+    ("Заменить два стула в кабинете 21", "Треснули сиденья, пользоваться нельзя.",
+     "furniture", "planned"),
+    ("Собрать новые шкафчики в раздевалке", "Привезли шесть шкафчиков, лежат в коробках.",
+     "furniture", "planned"),
+    ("Течёт кран в туалете на втором этаже", "Вода капает постоянно, раковина не перекрывается.",
+     "plumbing", "urgent"),
+    ("Прорвало трубу в подвале", "Вода идёт на пол рядом с электрощитовой.",
+     "plumbing", "emergency"),
+    ("Холодные батареи в спортзале", "После запуска отопления две секции не греют.",
+     "plumbing", "urgent"),
+    ("Не горят лампы в коридоре", "На первом этаже у столовой перегорели четыре светильника.",
+     "electrical", "planned"),
+    ("Искрит розетка в кабинете информатики", "Розетка у окна искрит при включении.",
+     "electrical", "emergency"),
+    ("Заменить выключатель в кабинете 7", "Выключатель западает, свет включается через раз.",
+     "electrical", "planned"),
+    ("Покрасить стену в раздевалке", "После протечки осталось пятно, нужна покраска.",
+     "repair", "planned"),
+    ("Заменить разбитое стекло", "Трещина в окне лестничного пролёта между 2 и 3 этажом.",
+     "repair", "urgent"),
+    ("Не закрывается замок в кабинете 15", "Ключ проворачивается, кабинет не запирается.",
+     "repair", "planned"),
+    ("Убрать снег у запасного выхода", "Запасный выход со стороны двора завален снегом.",
+     "cleaning", "urgent"),
+    ("Вывезти мусор после субботника", "У хозяйственного блока лежат мешки с листвой.",
+     "cleaning", "planned"),
+    ("Не печатает принтер в учительской", "Принтер захватывает бумагу и останавливается.",
+     "it", "planned"),
+    ("Нет интернета в кабинете 30", "С утра не открывается электронный журнал.",
+     "it", "urgent"),
+    ("Настроить проектор в актовом зале", "Изображение смещено, нужна настройка к пятнице.",
+     "it", "planned"),
+    ("Закупить бумагу и картриджи", "Запас бумаги на неделю, картриджи закончились.",
+     "supplies", "planned"),
+    ("Закончились моющие средства", "На пищеблоке осталось на два дня.", "supplies", "planned"),
+    ("Не работает турникет на входе", "Турникет не считывает пропуска с утра.",
+     "safety", "urgent"),
+    ("Проверить огнетушители на третьем этаже", "Истекает срок перезарядки.",
+     "safety", "planned"),
+    ("Нужна дополнительная ставка учителя-логопеда",
+     "В этом году в первые классы пришло 14 детей с заключениями ПМПК.",
+     "staff_increase", "planned"),
+    ("Неверно указана площадь второго корпуса", "Просим исправить данные в карточке учреждения.",
+     "data_fix", "planned"),
+    ("На основании чего считается норматив по уборщикам?",
+     "Прошу пояснить, откуда взята норма 600 м² на ставку.", "norms", "planned"),
 ]
+RESOLUTIONS = {
+    "furniture": "Отремонтировано, можно пользоваться.",
+    "plumbing": "Неисправность устранена, течи нет.",
+    "electrical": "Заменено, проверено под нагрузкой.",
+    "repair": "Работы выполнены.",
+    "cleaning": "Убрано.",
+    "it": "Настроено, работает.",
+    "supplies": "Выдано со склада, остальное включено в заявку на закупку.",
+    "safety": "Проверено, замечаний нет.",
+}
 
 
 def ensure_reference_data(db: Session) -> None:
@@ -149,12 +216,31 @@ class DemoGenerator:
         self.rules = [r for r in rules if r.kind == "staff"]
         self.rng = random.Random(seed)
         self._employee = 0
+        self._places: dict[int, tuple[float, float, str, int]] = {}
 
     def _employee_ref(self) -> str | None:
         if self.rng.random() < 0.07:
             return None  # вакансия
         self._employee += 1
         return pseudonymize(f"Демонстрационный сотрудник {self._employee}")
+
+    def _place(self, municipality: Municipality) -> tuple[float, float, str, int]:
+        """Точка для нового учреждения. Каждое третье ставится вплотную к предыдущему:
+        так получаются площадки из корпусов разных учреждений."""
+        rng = self.rng
+        previous = self._places.get(municipality.id)
+        if previous and rng.random() < 0.35:
+            lat, lon, street, house = previous
+            lat, lon = shift(lat, lon, rng.uniform(90, 230), rng.uniform(0, 360))
+            place = (lat, lon, street, house + rng.choice([1, 2]))
+        else:
+            # У каждого муниципалитета своя условная точка на карте области
+            base_lat = 55.2 + (municipality.id * 37 % 100) / 100 * 1.4
+            base_lon = 36.6 + (municipality.id * 53 % 100) / 100 * 2.2
+            lat, lon = shift(base_lat, base_lon, rng.uniform(300, 4500), rng.uniform(0, 360))
+            place = (lat, lon, rng.choice(STREETS), rng.randint(1, 60))
+        self._places[municipality.id] = place
+        return place
 
     def organization(self, municipality: Municipality, index: int,
                      mostly_complexes: bool = False) -> Organization:
@@ -177,7 +263,9 @@ class DemoGenerator:
                            name=f"{name} ({municipality.name})",
                            external_id=f"OU-{municipality.id:03d}-{index:04d}")
         org.enrollments = self._enrollments(school, preschool)
-        org.buildings = self._buildings(school + preschool, org_type)
+        org.buildings = self._buildings(school + preschool, org_type, municipality,
+                                        org.external_id)
+        org.address = org.buildings[0].address
         org.positions = self._positions(org)
         return org
 
@@ -214,20 +302,45 @@ class DemoGenerator:
                     special_needs_count=round(students * special_share)))
         return rows
 
-    def _buildings(self, students: int, org_type: str) -> list[Building]:
+    def _buildings(self, students: int, org_type: str, municipality: Municipality,
+                   code: str) -> list[Building]:
         rng = self.rng
         count = 1 if students < 600 else rng.choice([1, 2, 2, 3])
         area_total = students * rng.uniform(7.5, 11.0)
         names = ["Главный корпус", "Корпус начальной школы", "Дошкольное отделение"]
         if org_type == "preschool":
             names = ["Основное здание", "Корпус № 2", "Корпус № 3"]
-        return [
-            Building(name=names[i], area_sqm=Decimal(round(area_total / count, 1)),
-                     floors=rng.choice([2, 3, 3, 4]) if org_type != "preschool" else 2,
-                     year_built=rng.randint(1962, 2021),
-                     condition=rng.choice(["good", "satisfactory", "satisfactory", "poor"]))
-            for i in range(count)
-        ]
+        lat, lon, street, house = self._place(municipality)
+        # Главный корпус крупнее остальных
+        weights = [1.0] + [rng.uniform(0.35, 0.8) for _ in range(count - 1)]
+
+        buildings = []
+        for i, weight in enumerate(weights):
+            share = weight / sum(weights)
+            address = f"{municipality.name}, ул. {street}, д. {house}"
+            point = (lat, lon)
+            if i and rng.random() < 0.7:
+                # Соседний корпус на том же участке
+                address += f", корп. {i + 1}"
+                point = shift(lat, lon, rng.uniform(50, 200), rng.uniform(0, 360))
+            elif i:
+                address = (f"{municipality.name}, ул. {rng.choice(STREETS)}, "
+                           f"д. {rng.randint(1, 60)}")
+                point = shift(lat, lon, rng.uniform(900, 2500), rng.uniform(0, 360))
+            here = round(students * share)
+            # Каждое восьмое здание заметно недозаполнено
+            fill = rng.uniform(0.3, 0.48) if rng.random() < 0.12 else rng.uniform(0.6, 1.1)
+            buildings.append(Building(
+                name=names[i], area_sqm=Decimal(round(area_total * share, 1)),
+                floors=rng.choice([2, 3, 3, 4]) if org_type != "preschool" else 2,
+                year_built=rng.randint(1962, 2021),
+                condition=rng.choice(["good", "satisfactory", "satisfactory", "poor"]),
+                address=address, latitude=Decimal(str(round(point[0], 6))),
+                longitude=Decimal(str(round(point[1], 6))),
+                capacity=max(round(here / fill, -1), 20), occupancy=here,
+                rgis_id=f"RGIS-{code[3:]}-{i + 1}",
+            ))
+        return buildings
 
     def _positions(self, org: Organization) -> list[StaffPosition]:
         """Штат строится от норматива с отклонениями, чтобы аналитике было что находить."""
@@ -257,6 +370,18 @@ class DemoGenerator:
                 factor = rng.uniform(0.85, 1.3)
             total = max(round(norm * factor * 4) / 4, 0.25)
             positions += self._split(code, total, org.org_type)
+
+        main, others = org.buildings[0], org.buildings[1:]
+        areas = [float(b.area_sqm) for b in org.buildings]
+        for position in positions:
+            bound = position.function_code in SITE_BOUND and others
+            position.building = rng.choices(org.buildings, areas)[0] if bound else main
+        for building in others:
+            if rng.random() < 0.65:
+                for code, rate in rng.sample(EXTRA_STAFF, rng.choice([1, 2, 2])):
+                    for position in self._split(code, rate, org.org_type):
+                        position.building = building
+                        positions.append(position)
         return positions
 
     def _split(self, code: str, total: float, org_type: str) -> list[StaffPosition]:
@@ -287,6 +412,14 @@ class DemoGenerator:
                 employee_ref=self._employee_ref(), weekly_hours=hours, duties=DUTIES.get(code),
             ))
         return rows
+
+
+def shift(lat: float, lon: float, meters: float, bearing: float) -> tuple[float, float]:
+    """Точка на заданном расстоянии и направлении от исходной."""
+    angle = math.radians(bearing)
+    dlat = meters * math.cos(angle) / 111_320
+    dlon = meters * math.sin(angle) / (111_320 * math.cos(math.radians(lat)))
+    return lat + dlat, lon + dlon
 
 
 def load_profile(path: str | Path | None = None) -> dict:
@@ -383,13 +516,76 @@ def seed_demo(db: Session, org_count: int, profile: dict | None = None) -> None:
     ]
     db.add(program)
 
-    for text in REQUESTS:
-        topic = routing.classify_by_rules(text)
-        db.add(IncomingRequest(organization_id=first_org.id, author_id=users[Role.director].id,
-                               text=text, topic=topic, routed_role=routing.TOPICS[topic][1],
-                               classified_by="rules"))
+    pilot_orgs = db.scalars(
+        select(Organization)
+        .where(Organization.municipality_id == first_municipality.id)
+        .order_by((Organization.id != first_org.id), Organization.id)
+    ).all()
+    seed_requests(db, generator.rng, pilot_orgs, users, password_hash)
     db.commit()
     log.info("Demo data ready: %d organizations, demo password is %s", org_count, DEMO_PASSWORD)
+
+
+def seed_requests(db: Session, rng: random.Random, organizations: list[Organization],
+                  users: dict[Role, User], password_hash: str) -> None:
+    """Заявки за последний месяц в разных статусах, чтобы дашборд и доска не были пустыми."""
+    first_org = organizations[0]
+    employee = User(email="employee@demo.ru", full_name="Лебедева О. И.", role=Role.employee,
+                    organization_id=first_org.id, password_hash=password_hash)
+    names = ["Гришин В. П.", "Тарасов Н. А.", "Белова И. С.", "Фомин Г. Р."]
+    for number, (org, name) in enumerate(zip(organizations, names, strict=False), start=1):
+        email = "executor@demo.ru" if number == 1 else f"executor{number}@demo.ru"
+        db.add(User(email=email, full_name=name, role=Role.executor, organization_id=org.id,
+                    password_hash=password_hash))
+    db.add(employee)
+    db.flush()
+
+    S = RequestStatus
+    outcomes = [S.closed] * 9 + [S.done] * 2 + [S.in_progress] * 4 + [S.assigned] * 3 + [
+        S.on_hold, S.rejected]
+    moment = datetime.now(UTC)
+    for index in range(46):
+        title, text, topic, kind = REQUESTS[index % len(REQUESTS)]
+        # Половина заявок — в учреждении демо-директора, остальные по соседям
+        org = first_org if index % 2 == 0 else rng.choice(organizations[1:6] or organizations)
+        author = users[Role.municipal_specialist]
+        if org.id == first_org.id:
+            author = employee if index % 4 else users[Role.director]
+        outcome = rng.choice(outcomes)
+        # Незакрытые заявки — свежие, иначе полдоски окажется просроченной
+        age = 27 * 24 if outcome in (S.closed, S.rejected) else 6 * 24
+        created = moment - timedelta(hours=rng.uniform(3, age))
+        request = helpdesk.create(
+            db, author, org, title=title, text=text, kind=kind, topic=topic,
+            building=rng.choice(org.buildings), location=None, created_at=created,
+        )
+        request.classified_by = "rules"
+        worker = request.assignee
+        if worker is None or outcome == S.assigned:
+            continue
+
+        limit = (moment - created).total_seconds() / 3600
+        allowed = (request.due_at - created).total_seconds() / 3600
+        # Примерно каждая пятая заявка выполняется с опозданием
+        spent = allowed * (rng.uniform(1.1, 1.8) if rng.random() < 0.2 else rng.uniform(0.2, 0.9))
+        spent = min(spent, limit * 0.9)
+        started = created + timedelta(hours=min(rng.uniform(0.5, 20), spent * 0.4))
+        finished = created + timedelta(hours=spent)
+        if outcome == S.rejected:
+            helpdesk.change_status(db, request, worker, S.rejected,
+                                   "Дубль: такая заявка уже в работе.", at=started)
+            continue
+        helpdesk.change_status(db, request, worker, S.in_progress, at=started)
+        if outcome == S.on_hold:
+            helpdesk.change_status(db, request, worker, S.on_hold,
+                                   "Уточните, пожалуйста, номер кабинета.", at=finished)
+        elif outcome in (S.done, S.closed):
+            helpdesk.change_status(db, request, worker, S.done,
+                                   RESOLUTIONS.get(topic, "Вопрос решён."), at=finished)
+            if outcome == S.closed:
+                confirmed = finished + timedelta(hours=rng.uniform(1, 30))
+                helpdesk.change_status(db, request, author, S.closed,
+                                       at=min(confirmed, moment))
 
 
 def _complete_first_steps(db: Session, tasks: list[Task], count: int) -> None:

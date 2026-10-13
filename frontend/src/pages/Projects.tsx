@@ -21,6 +21,7 @@ import {
 
 const KIND_LABELS: Record<string, string> = {
   normalization: 'Приведение к нормативу',
+  workload: 'Выравнивание загрузки',
   centralization: 'Централизация',
 }
 

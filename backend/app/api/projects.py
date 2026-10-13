@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.deps import APPROVERS, PLANNERS, Scope, audit, get_scope, require_roles
-from app.models import GeneratedDocument, Project, ProjectStatus, Role, User
+from app.models import GeneratedDocument, Municipality, Project, ProjectStatus, Role, User
 from app.schemas import (
     DocumentGenerate,
     DocumentOut,
@@ -71,12 +71,19 @@ def generate_project(body: ProjectGenerate, request: Request,
     else:
         if body.municipality_id is None or not scope.can_see_municipality(body.municipality_id):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Укажите муниципалитет")
-        reports = analytics.load_reports(db, scope.org_ids(body.municipality_id))
-        project = project_service.centralization_project(reports, user)
+        org_ids = scope.org_ids(body.municipality_id)
+        if body.kind == "workload":
+            municipality = db.get(Municipality, body.municipality_id)
+            report = analytics.load_sites(db, org_ids, get_settings().site_radius_m)
+            project = project_service.workload_project(report, municipality.id,
+                                                       municipality.name, user)
+        else:
+            reports = analytics.load_reports(db, org_ids)
+            project = project_service.centralization_project(reports, user)
 
     if project is None:
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "Отклонений от нормативов нет — проект формировать не из чего")
+                            "Отклонений не найдено — проект формировать не из чего")
     db.add(project)
     db.flush()
     audit(db, user, "project_generated", entity="project", entity_id=project.id,

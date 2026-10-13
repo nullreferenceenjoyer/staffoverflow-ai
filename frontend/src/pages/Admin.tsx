@@ -4,6 +4,9 @@ import { api, Municipality, OrgSummary, Role, User } from '../api'
 import { Async, Badge, Card, Field, Form, Modal, Page, Tabs } from '../components/ui'
 import { fmtDateTime, ROLE_LABELS, useApi } from '../lib'
 
+// Роли, которые работают в пределах одного учреждения
+const ORG_ROLES: Role[] = ['director', 'executor', 'employee']
+
 interface AuditRow {
   id: number
   created_at: string
@@ -45,7 +48,7 @@ function UserEditor({
     const body = {
       ...draft,
       municipality_id: draft.role === 'municipal_specialist' ? draft.municipality_id : null,
-      organization_id: draft.role === 'director' ? draft.organization_id : null,
+      organization_id: ORG_ROLES.includes(draft.role) ? draft.organization_id : null,
     }
     if (user) {
       const { email: _email, password, ...rest } = body
@@ -118,7 +121,7 @@ function UserEditor({
             </select>
           </Field>
         )}
-        {draft.role === 'director' && (
+        {ORG_ROLES.includes(draft.role) && (
           <Field label="Учреждение">
             <select
               value={draft.organization_id ?? ''}

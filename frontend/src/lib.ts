@@ -52,12 +52,37 @@ export const fmtDate = (value: string | null) =>
 export const fmtDateTime = (value: string) =>
   new Date(value).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })
 
+export const fmtDay = (value: string) =>
+  new Date(value).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
+
+/** «через 3 ч», «2 дн. назад» — для сроков заявок. */
+export function fmtRelative(value: string, now = Date.now()) {
+  const diff = new Date(value).getTime() - now
+  const hours = Math.abs(diff) / 3_600_000
+  const amount =
+    hours < 1
+      ? 'меньше часа'
+      : hours < 48
+        ? `${Math.round(hours)} ч`
+        : `${Math.round(hours / 24)} дн.`
+  return diff >= 0 ? `через ${amount}` : `${amount} назад`
+}
+
+export function fmtHours(hours: number | null) {
+  if (hours === null) return '—'
+  return hours < 48
+    ? `${number.format(Math.round(hours))} ч`
+    : `${number.format(Math.round(hours / 2.4) / 10)} дн.`
+}
+
 export const ROLE_LABELS: Record<Role, string> = {
   admin: 'Администратор',
   regional_analyst: 'Региональный аналитик',
   municipal_specialist: 'Специалист управления образования',
   director: 'Директор ОУ',
   observer: 'Наблюдатель',
+  executor: 'Хозяйственная служба ОУ',
+  employee: 'Сотрудник ОУ',
 }
 
 export const CATEGORY_LABELS: Record<Category, string> = {
@@ -109,8 +134,25 @@ export const TASK_STATUS: Record<string, string> = {
   done: 'Готово',
 }
 
+export const REQUEST_STATUS: Record<string, { label: string; tone: string }> = {
+  new: { label: 'Новая', tone: 'amber' },
+  assigned: { label: 'Назначена', tone: 'blue' },
+  in_progress: { label: 'В работе', tone: 'blue' },
+  on_hold: { label: 'Ждёт ответа', tone: 'orange' },
+  done: { label: 'Выполнена', tone: 'green' },
+  closed: { label: 'Закрыта', tone: 'gray' },
+  rejected: { label: 'Отклонена', tone: 'red' },
+}
+
+export const REQUEST_KIND: Record<string, { label: string; tone: string }> = {
+  planned: { label: 'Плановая', tone: 'gray' },
+  urgent: { label: 'Срочная', tone: 'amber' },
+  emergency: { label: 'Аварийная', tone: 'red' },
+}
+
 // Те же группы ролей, что и в backend/app/deps.py
-export const canEdit = (user: User) => user.role !== 'observer'
+export const isServiceRole = (user: User) => ['executor', 'employee'].includes(user.role)
+export const canEdit = (user: User) => !['observer', 'executor', 'employee'].includes(user.role)
 export const canPlan = (user: User) =>
   ['admin', 'regional_analyst', 'municipal_specialist'].includes(user.role)
 export const canApprove = (user: User) => ['admin', 'regional_analyst'].includes(user.role)

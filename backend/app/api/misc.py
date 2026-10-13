@@ -1,93 +1,30 @@
-"""Обращения учреждений, чат с помощником, пользователи и журнал действий."""
+"""Чат с помощником, уведомления, пользователи и журнал действий."""
 
 import json
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
-from app.deps import Scope, audit, get_current_user, get_scope, require_roles
-from app.models import AuditLog, IncomingRequest, Organization, Role, User
-from app.schemas import (
-    ChatRequest,
-    RequestIn,
-    RequestOut,
-    RequestUpdate,
-    UserCreate,
-    UserOut,
-    UserUpdate,
+from app.deps import (
+    SERVICE_ROLES,
+    Scope,
+    audit,
+    get_current_user,
+    get_scope,
+    require_analytics_access,
+    require_roles,
 )
+from app.models import AuditLog, Notification, Role, User
+from app.schemas import ChatRequest, NotificationOut, UserCreate, UserOut, UserUpdate
 from app.security import hash_password
-from app.services import assistant, llm, routing
+from app.services import assistant, llm
 
 router = APIRouter()
-
-
-# --- обращения -----------------------------------------------------------------------
-
-
-def _visible_requests(scope: Scope):
-    query = select(IncomingRequest).order_by(IncomingRequest.created_at.desc())
-    if scope.is_regional:
-        return query
-    ids = scope.organizations().with_only_columns(Organization.id)
-    return query.where(IncomingRequest.organization_id.in_(ids))
-
-
-def _request_out(item: IncomingRequest) -> dict:
-    return {
-        **RequestOut.model_validate(item).model_dump(),
-        "organization": item.organization.name,
-        "topic_title": routing.TOPICS.get(item.topic, routing.TOPICS["other"])[0],
-    }
-
-
-@router.get("/requests", tags=["requests"])
-def list_requests(scope: Scope = Depends(get_scope)):
-    return [_request_out(r) for r in scope.db.scalars(_visible_requests(scope).limit(300))]
-
-
-@router.post("/requests", status_code=status.HTTP_201_CREATED, tags=["requests"])
-def create_request(body: RequestIn, request: Request, scope: Scope = Depends(get_scope)):
-    user = scope.user
-    if user.role == Role.observer:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Наблюдатель не может создавать обращения")
-    org_id = user.organization_id if user.role == Role.director else body.organization_id
-    if org_id is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Укажите учреждение")
-    org = scope.get_org(org_id)
-
-    topic, role, classified_by = routing.classify(body.text)
-    item = IncomingRequest(organization_id=org.id, author_id=user.id, text=body.text,
-                           topic=topic, routed_role=role, classified_by=classified_by)
-    scope.db.add(item)
-    scope.db.flush()
-    audit(scope.db, user, "request_created", entity="request", entity_id=item.id,
-          details={"topic": topic, "routed_role": role, "by": classified_by}, request=request)
-    scope.db.commit()
-    return _request_out(item)
-
-
-@router.patch("/requests/{request_id}", tags=["requests"])
-def update_request(request_id: int, body: RequestUpdate, request: Request,
-                   scope: Scope = Depends(get_scope)):
-    user = scope.user
-    item = scope.db.scalar(_visible_requests(scope).where(IncomingRequest.id == request_id))
-    if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Обращение не найдено")
-    # Отвечает тот, кому обращение направлено, либо администратор
-    if user.role not in (item.routed_role, Role.admin):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Обращение адресовано другой роли")
-    changes = body.model_dump(exclude_unset=True)
-    for key, value in changes.items():
-        setattr(item, key, value)
-    audit(scope.db, user, "request_updated", entity="request", entity_id=item.id,
-          details={k: str(v)[:200] for k, v in changes.items()}, request=request)
-    scope.db.commit()
-    return _request_out(item)
 
 
 # --- помощник ------------------------------------------------------------------------
@@ -98,7 +35,8 @@ def assistant_status(_: User = Depends(get_current_user)):
     return llm.probe()
 
 
-@router.post("/assistant/chat", tags=["assistant"])
+@router.post("/assistant/chat", tags=["assistant"],
+             dependencies=[Depends(require_analytics_access)])
 def chat(body: ChatRequest, request: Request, scope: Scope = Depends(get_scope)):
     """Ответ помощника потоком Server-Sent Events."""
     audit(scope.db, scope.user, "assistant_question", details={"question": body.question[:500]},
@@ -120,6 +58,31 @@ def chat(body: ChatRequest, request: Request, scope: Scope = Depends(get_scope))
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# --- уведомления ---------------------------------------------------------------------
+
+
+@router.get("/notifications", response_model=list[NotificationOut], tags=["notifications"])
+def list_notifications(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return db.scalars(
+        select(Notification)
+        .where(Notification.user_id == user.id)
+        .order_by(Notification.created_at.desc())
+        .limit(50)
+    ).all()
+
+
+@router.post("/notifications/read", status_code=status.HTTP_204_NO_CONTENT,
+             tags=["notifications"])
+def mark_notifications_read(db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    db.execute(
+        update(Notification)
+        .where(Notification.user_id == user.id, Notification.read_at.is_(None))
+        .values(read_at=datetime.now(UTC))
+    )
+    db.commit()
+
+
 # --- пользователи и аудит ------------------------------------------------------------
 
 
@@ -127,9 +90,9 @@ def _check_binding(role: Role, municipality_id: int | None, organization_id: int
     if role == Role.municipal_specialist and municipality_id is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Специалисту нужно указать муниципалитет")
-    if role == Role.director and organization_id is None:
+    if role in (Role.director, *SERVICE_ROLES) and organization_id is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            "Директору нужно указать учреждение")
+                            "Для этой роли нужно указать учреждение")
 
 
 @router.get("/users", response_model=list[UserOut], tags=["admin"])

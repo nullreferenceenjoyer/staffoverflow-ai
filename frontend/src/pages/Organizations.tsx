@@ -15,7 +15,7 @@ interface ImportResult {
 }
 
 function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [kind, setKind] = useState<'staffing' | 'enrollment'>('staffing')
+  const [kind, setKind] = useState<'staffing' | 'enrollment' | 'buildings'>('staffing')
   const [file, setFile] = useState<File | null>(null)
   const [replace, setReplace] = useState(true)
   const [result, setResult] = useState<ImportResult | null>(null)
@@ -36,6 +36,7 @@ function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
           <select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
             <option value="staffing">Штатное расписание</option>
             <option value="enrollment">Контингент</option>
+            <option value="buildings">Здания из РГИС</option>
           </select>
         </Field>
         <Field label="Файл CSV или XLSX">
@@ -57,10 +58,17 @@ function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
             </label>
             <p className="muted">
               Колонки: Организация, Подразделение, Должность, Количество ставок, ФОТ, Сотрудник,
-              Часов в неделю. ФИО заменяется обезличенным идентификатором, остальные колонки
-              (паспорт, СНИЛС и т. п.) не сохраняются.
+              Часов в неделю, Корпус. ФИО заменяется обезличенным идентификатором, остальные колонки
+              (паспорт, СНИЛС и т. п.) не сохраняются. По колонке «Корпус» ставка привязывается к
+              зданию — это нужно для анализа загрузки по площадкам.
             </p>
           </>
+        ) : kind === 'buildings' ? (
+          <p className="muted">
+            Выгрузка реестра объектов из РГИС. Колонки: Организация, Наименование объекта, Код
+            объекта РГИС, Адрес, Широта, Долгота, Общая площадь, Этажность, Проектная мощность,
+            Наполняемость, Год постройки. Здание с известным кодом обновляется, новое — добавляется.
+          </p>
         ) : (
           <p className="muted">
             Колонки: Организация, Учебный год, Ступень (дошкольное, начальное, основное, среднее),

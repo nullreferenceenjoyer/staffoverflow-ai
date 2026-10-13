@@ -1,7 +1,8 @@
-import { FormEvent, ReactNode, useEffect, useState } from 'react'
+import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 
 import { Municipality } from '../api'
 import { fmtDelta, useApi } from '../lib'
+import { Icon, IconName } from './icons'
 
 export function Page({
   title,
@@ -15,16 +16,16 @@ export function Page({
   children: ReactNode
 }) {
   return (
-    <>
+    <div className="page">
       <header className="page-header">
         <div>
           <h1>{title}</h1>
           {hint && <p className="hint">{hint}</p>}
         </div>
-        {actions && <div className="actions">{actions}</div>}
+        {actions && <div className="actions wrap">{actions}</div>}
       </header>
       {children}
-    </>
+    </div>
   )
 }
 
@@ -50,13 +51,80 @@ export function Card({
   )
 }
 
-export function Kpi({ label, value, note }: { label: string; value: string; note?: string }) {
+/** Число, которое «докручивается» до значения при появлении и при каждом изменении. */
+export function Counter({
+  value,
+  format = String,
+}: {
+  value: number
+  format?: (value: number) => string
+}) {
+  const [shown, setShown] = useState(0)
+  const from = useRef(0)
+
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setShown(value)
+      return
+    }
+    const start = performance.now()
+    const origin = from.current
+    let frame = 0
+    const tick = (now: number) => {
+      const t = Math.min((now - start) / 700, 1)
+      const eased = 1 - Math.pow(1 - t, 3)
+      const current = origin + (value - origin) * eased
+      from.current = current
+      setShown(t === 1 ? value : current)
+      if (t < 1) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [value])
+
+  return <>{format(shown)}</>
+}
+
+export function Kpi({
+  label,
+  value,
+  note,
+  icon,
+  tone,
+}: {
+  label: string
+  value: ReactNode
+  note?: ReactNode
+  icon?: IconName
+  tone?: 'good' | 'warn' | 'critical'
+}) {
   return (
-    <div className="kpi">
-      <span className="kpi-label">{label}</span>
+    <div className={`kpi ${tone ? `tone-${tone}` : ''}`}>
+      <span className="kpi-label">
+        {icon && (
+          <span className="kpi-icon">
+            <Icon name={icon} size={16} />
+          </span>
+        )}
+        {label}
+      </span>
       <strong>{value}</strong>
       {note && <span className="kpi-note">{note}</span>}
     </div>
+  )
+}
+
+export function Avatar({ name, small }: { name: string; small?: boolean }) {
+  const initials = name
+    .split(/[\s.]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+  return (
+    <span className={`avatar ${small ? 'small' : ''}`} title={name}>
+      {initials.toUpperCase()}
+    </span>
   )
 }
 
@@ -79,7 +147,18 @@ export function Async<T>({
   children: (data: T) => ReactNode
 }) {
   if (state.error) return <div className="notice notice-error">{state.error}</div>
-  if (state.data === null) return <div className="muted pad">Загрузка…</div>
+  if (state.data === null) {
+    return (
+      <div className="skeletons" aria-busy="true" aria-label="Загрузка">
+        <div className="row">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="skeleton" style={{ height: 92 }} />
+          ))}
+        </div>
+        <div className="skeleton" style={{ height: 260 }} />
+      </div>
+    )
+  }
   return <div className={state.loading ? 'stale' : undefined}>{children(state.data)}</div>
 }
 
@@ -135,12 +214,46 @@ export function Modal({
       <div className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-label={title}>
         <div className="card-head">
           <h2>{title}</h2>
-          <button className="ghost" onClick={onClose} aria-label="Закрыть">
-            ✕
+          <button className="ghost icon" onClick={onClose} aria-label="Закрыть">
+            <Icon name="x" />
           </button>
         </div>
         {children}
       </div>
+    </div>
+  )
+}
+
+/** Боковая панель: карточка объекта поверх списка, список остаётся на месте. */
+export function Drawer({
+  title,
+  onClose,
+  children,
+  footer,
+}: {
+  title: ReactNode
+  onClose: () => void
+  children: ReactNode
+  footer?: ReactNode
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <aside className="drawer" role="dialog">
+        <div className="drawer-head">
+          <div>{title}</div>
+          <button className="ghost icon" onClick={onClose} aria-label="Закрыть">
+            <Icon name="x" />
+          </button>
+        </div>
+        <div className="drawer-body">{children}</div>
+        {footer && <div className="drawer-foot">{footer}</div>}
+      </aside>
     </div>
   )
 }
