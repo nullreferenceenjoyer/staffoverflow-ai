@@ -13,7 +13,8 @@ router = APIRouter(tags=["requests"])
 
 def _query(scope: Scope):
     return helpdesk.visible(scope).options(
-        selectinload(IncomingRequest.organization), selectinload(IncomingRequest.building),
+        selectinload(IncomingRequest.organization).selectinload(Organization.municipality),
+        selectinload(IncomingRequest.building),
         selectinload(IncomingRequest.author), selectinload(IncomingRequest.assignee),
         selectinload(IncomingRequest.events),
     )
@@ -44,6 +45,7 @@ def _out(item: IncomingRequest, user: User, detailed: bool = False) -> dict:
         "status": item.status,
         "organization_id": item.organization_id,
         "organization": item.organization.name,
+        "municipality": item.organization.municipality.name,
         "building_id": item.building_id,
         "building": item.building.name if item.building else None,
         "location": item.location,
@@ -62,6 +64,7 @@ def _out(item: IncomingRequest, user: User, detailed: bool = False) -> dict:
         "can_manage": helpdesk.can_manage(user, item),
         "is_author": item.author_id == user.id,
         "actions": _actions(item, user),
+        "my_turn": helpdesk.my_turn(user, item),
     }
     if detailed:
         result["events"] = [
@@ -126,8 +129,10 @@ def list_requests(scope: Scope = Depends(get_scope)):
 
 @router.get("/requests/stats")
 def request_stats(days: int = 30, scope: Scope = Depends(get_scope)):
-    items = scope.db.scalars(_query(scope)).all()
-    return helpdesk.stats(list(items), days=max(7, min(days, 180)))
+    items = list(scope.db.scalars(_query(scope)))
+    result = helpdesk.stats(items, days=max(7, min(days, 180)))
+    result["my_turn"] = sum(1 for item in items if helpdesk.my_turn(scope.user, item))
+    return result
 
 
 @router.post("/requests", status_code=status.HTTP_201_CREATED)

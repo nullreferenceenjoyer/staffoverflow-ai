@@ -163,9 +163,10 @@ def test_request_is_routed_by_topic(client, login):
     assert body["status"] == "assigned"
     assert body["assignee"]["role"] == "municipal_specialist"
 
-    # Директор не ведёт эту заявку и отклонить её не может
+    # Директор не ведёт эту заявку: отчитаться за неё не может, только отозвать как автор
+    assert body["actions"] == ["rejected"]
     assert client.post(f"/api/requests/{body['id']}/status", headers=login(DIRECTOR),
-                       json={"status": "rejected", "comment": "не нужно"}).status_code == 409
+                       json={"status": "done", "comment": "сами справились"}).status_code == 409
 
 
 def test_furniture_request_goes_through_all_statuses(client, login):
@@ -181,7 +182,10 @@ def test_furniture_request_goes_through_all_statuses(client, login):
     # Плановая заявка на мебель — неделя, исполнитель — хозяйственная служба учреждения
     assert request["assignee"]["role"] == "executor"
     assert request["due_at"][:10] > request["created_at"][:10]
-    assert request["actions"] == []  # заявитель пока ничего сделать не может
+    # Пока работа не сделана, заявитель может только отозвать заявку, и ход не за ним
+    assert request["actions"] == ["rejected"]
+    assert request["my_turn"] is None
+    assert client.get(url, headers=executor).json()["my_turn"] == "Возьмите заявку в работу"
 
     # Вопрос исполнителя ставит заявку на паузу, ответ заявителя возвращает в работу
     paused = client.post(f"{url}/comments", headers=executor,
@@ -198,6 +202,7 @@ def test_furniture_request_goes_through_all_statuses(client, login):
     done = client.post(f"{url}/status", headers=executor,
                        json={"status": "done", "comment": "Петли заменены"}).json()
     assert (done["status"], done["resolution"]) == ("done", "Петли заменены")
+    assert client.get(url, headers=employee).json()["my_turn"] == "Проверьте работу и примите её"
     assert client.post(f"{url}/status", headers=employee,
                        json={"status": "in_progress"}).status_code == 409
     closed = client.post(f"{url}/status", headers=employee, json={"status": "closed"}).json()
@@ -214,6 +219,21 @@ def test_furniture_request_goes_through_all_statuses(client, login):
     # Исполнителю пришло уведомление о назначении, заявителю — о выполнении
     notes = client.get("/api/notifications", headers=employee).json()
     assert any(n["request_id"] == request["id"] and "выполнена" in n["text"] for n in notes)
+
+
+def test_author_can_withdraw_request_without_reason(client, login):
+    employee, executor = login(EMPLOYEE), login(EXECUTOR)
+    request = client.post("/api/requests", headers=employee,
+                          json={"title": "Не работает розетка в кабинете 3"}).json()
+    url = f"/api/requests/{request['id']}"
+    # Исполнитель без причины отклонить не может, а заявитель отзывает свою молча
+    assert client.post(f"{url}/status", headers=executor,
+                       json={"status": "rejected"}).status_code == 409
+    withdrawn = client.post(f"{url}/status", headers=employee,
+                            json={"status": "rejected"}).json()
+    assert withdrawn["status"] == "rejected"
+    assert withdrawn["events"][-1]["text"] == "Отозвана заявителем"
+    assert withdrawn["actions"] == []
 
 
 def test_emergency_request_gets_short_deadline(client, login):
@@ -271,6 +291,7 @@ def test_request_stats_for_dashboard(client, login):
     assert len(stats["flow"]) == 30
     assert stats["by_topic"][0]["total"] >= stats["by_topic"][-1]["total"]
     assert 0 <= stats["in_time_pct"] <= 100
+    assert stats["my_turn"] >= 0
 
 
 def test_workload_report_finds_idle_staff_on_sites(client, login):

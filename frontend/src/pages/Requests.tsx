@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { CSSProperties, Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Area,
@@ -12,10 +12,10 @@ import {
 
 import { api, OrgRequest, RequestKind, RequestMeta, RequestStats, RequestStatus } from '../api'
 import { useUser } from '../App'
-import { StatusBar } from '../components/blocks'
+import { STATUS_COLOR, StatusBar } from '../components/blocks'
 import { AXIS, ChartTip, Legend, Meter, SERIES } from '../components/charts'
-import { Gantt, GanttItem } from '../components/Gantt'
 import { Icon, IconName } from '../components/icons'
+import { Grouping, GROUPINGS, RequestTree } from '../components/RequestTree'
 import {
   Async,
   Avatar,
@@ -43,7 +43,7 @@ import {
   useApi,
 } from '../lib'
 
-type Tab = 'dashboard' | 'board' | 'list' | 'gantt'
+type Tab = 'tree' | 'board' | 'stats'
 
 const BOARD: RequestStatus[] = ['new', 'assigned', 'in_progress', 'on_hold', 'done']
 const ACTIVE: RequestStatus[] = ['new', 'assigned', 'in_progress', 'on_hold']
@@ -241,10 +241,86 @@ function NewRequest({
   )
 }
 
-const ACTION_LABELS: Record<string, string> = {
-  on_hold: 'Запросить уточнение',
-  done: 'Выполнено',
-  rejected: 'Отклонить',
+// Путь заявки, как его видит человек. «Ждёт ответа» — пауза на шаге «В работе».
+const STEPS: [RequestStatus, string][] = [
+  ['new', 'Создана'],
+  ['assigned', 'Назначена'],
+  ['in_progress', 'В работе'],
+  ['done', 'Выполнена'],
+  ['closed', 'Принята'],
+]
+
+function StatusPath({ request }: { request: OrgRequest }) {
+  if (request.status === 'rejected') {
+    return (
+      <div className="notice notice-error">
+        <Icon name="x" />
+        <span>Заявка отклонена или отозвана. Причина — в ходе работы ниже.</span>
+      </div>
+    )
+  }
+  const current = request.status === 'on_hold' ? 2 : STEPS.findIndex(([s]) => s === request.status)
+  return (
+    <ol className="steps">
+      {STEPS.map(([status, label], i) => (
+        <li key={status} className={i < current ? 'passed' : i === current ? 'current' : ''}>
+          <span className="step-dot">{i < current ? <Icon name="check" size={12} /> : i + 1}</span>
+          {i === current && request.status === 'on_hold' ? 'Ждёт ответа' : label}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+/** Одна фраза о том, что происходит с заявкой и за кем ход. */
+function situation(request: OrgRequest) {
+  const who = request.assignee?.name
+  switch (request.status) {
+    case 'new':
+      return 'Исполнитель пока не найден. Руководитель назначит его вручную.'
+    case 'assigned':
+      return `Исполнитель — ${who}. Заявку ещё не взяли в работу.`
+    case 'in_progress':
+      return `Заявку выполняет ${who}.`
+    case 'on_hold':
+      return 'Исполнитель задал вопрос и ждёт ответа заявителя. Пока ждём, срок не идёт.'
+    case 'done':
+      return 'Работа выполнена. Заявитель проверяет и принимает её; если промолчит, заявка закроется сама через несколько дней.'
+    case 'closed':
+      return 'Работа принята, заявка закрыта.'
+    default:
+      return ''
+  }
+}
+
+interface Action {
+  status: RequestStatus
+  label: string
+  tone: 'primary' | 'danger' | ''
+  // Без текста в поле комментария это действие сервер не примет
+  needsText?: string
+  confirm?: string
+}
+
+function describe(status: RequestStatus, request: OrgRequest): Action {
+  switch (status) {
+    case 'in_progress':
+      return request.status === 'done'
+        ? { status, label: 'Вернуть на доработку', tone: '', needsText: 'Напишите, что не сделано' }
+        : { status, label: 'Взять в работу', tone: 'primary' }
+    case 'on_hold':
+      return { status, label: 'Задать вопрос заявителю', tone: '', needsText: 'Напишите вопрос' }
+    case 'done':
+      return { status, label: 'Готово, отчитаться', tone: 'primary' }
+    case 'closed':
+      return { status, label: request.is_author ? 'Принять работу' : 'Закрыть', tone: 'primary' }
+    case 'rejected':
+      return request.is_author
+        ? { status, label: 'Отозвать заявку', tone: 'danger', confirm: 'Отозвать заявку?' }
+        : { status, label: 'Отклонить', tone: 'danger', needsText: 'Напишите причину отказа' }
+    default:
+      return { status, label: REQUEST_STATUS[status].label, tone: '' }
+  }
 }
 
 function RequestDrawer({
@@ -259,9 +335,10 @@ function RequestDrawer({
   const state = useApi<OrgRequest>(`/requests/${id}`)
   const user = useUser()
   const [text, setText] = useState('')
-  const [needsReply, setNeedsReply] = useState(false)
+  const [due, setDue] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const input = useRef<HTMLTextAreaElement>(null)
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true)
@@ -269,7 +346,7 @@ function RequestDrawer({
     try {
       await action()
       setText('')
-      setNeedsReply(false)
+      setDue(null)
       await state.reload()
       onChanged()
     } catch (e) {
@@ -295,6 +372,13 @@ function RequestDrawer({
   const closed = request.status === 'closed' || request.status === 'rejected'
   const isAssignee = request.assignee?.id === user.id
   const canComment = !closed && user.role !== 'observer'
+  // Синей остаётся одна кнопка — следующий обычный шаг, остальные действия рядом
+  const actions = request.actions
+    .map((status) => describe(status, request))
+    .sort((a, b) => Number(b.tone === 'primary') - Number(a.tone === 'primary'))
+    .map((action, i): Action =>
+      i > 0 && action.tone === 'primary' ? { ...action, tone: '' } : action,
+    )
   // Доля срока, которая уже прошла, — для полосы под сроком
   const total = request.due_at
     ? new Date(request.due_at).getTime() - new Date(request.created_at).getTime()
@@ -302,12 +386,21 @@ function RequestDrawer({
   const end = new Date(request.resolved_at ?? Date.now()).getTime()
   const spent = total > 0 ? (end - new Date(request.created_at).getTime()) / total : 0
 
-  const actionLabel = (status: RequestStatus) => {
-    if (status === 'in_progress') {
-      return request.status === 'done' ? 'Вернуть в работу' : 'Взять в работу'
+  function act(action: Action) {
+    if (action.needsText && !text.trim()) {
+      setError(`${action.needsText} в поле выше, затем нажмите «${action.label}» ещё раз`)
+      input.current?.focus()
+      return
     }
-    if (status === 'closed') return request.is_author ? 'Принять работу' : 'Закрыть'
-    return ACTION_LABELS[status]
+    if (action.confirm && !window.confirm(action.confirm)) return
+    // Вопрос от исполнителя уходит в переписку, а статус меняется сам
+    if (action.status === 'on_hold' && isAssignee && request?.status !== 'on_hold') {
+      void run(() => api(`/requests/${id}/comments`, { body: { text, needs_reply: true } }))
+      return
+    }
+    void run(() =>
+      api(`/requests/${id}/status`, { body: { status: action.status, comment: text || null } }),
+    )
   }
 
   return (
@@ -318,79 +411,81 @@ function RequestDrawer({
           <div className="chips" style={{ marginBottom: 6 }}>
             <span className="muted">№ {request.id}</span>
             <Badge tone={REQUEST_STATUS[request.status].tone}>
-              {request.overdue && <span className="dot live" />}
               {REQUEST_STATUS[request.status].label}
             </Badge>
-            <Badge tone={REQUEST_KIND[request.kind].tone}>{REQUEST_KIND[request.kind].label}</Badge>
+            {request.kind !== 'planned' && (
+              <Badge tone={REQUEST_KIND[request.kind].tone}>
+                {REQUEST_KIND[request.kind].label}
+              </Badge>
+            )}
             {request.overdue && <Badge tone="red">Просрочена</Badge>}
           </div>
           <h2>{request.title}</h2>
         </>
       }
       footer={
-        canComment || request.actions.length ? (
+        canComment || actions.length ? (
           <>
             {canComment && (
               <textarea
+                ref={input}
                 rows={2}
                 style={{ width: '100%' }}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                placeholder="Комментарий или отчёт о выполнении"
+                placeholder={
+                  isAssignee
+                    ? 'Сообщение заявителю, вопрос или отчёт о выполнении'
+                    : 'Сообщение по заявке'
+                }
               />
             )}
             {error && <div className="chat-error">{error}</div>}
             <div className="actions wrap" style={{ marginTop: 8 }}>
+              {actions.map((action) => (
+                <button
+                  key={action.status}
+                  disabled={busy}
+                  className={action.tone}
+                  onClick={() => act(action)}
+                >
+                  {action.label}
+                </button>
+              ))}
               {canComment && (
                 <button
                   disabled={busy || !text.trim()}
-                  onClick={() =>
-                    run(() =>
-                      api(`/requests/${id}/comments`, {
-                        body: { text, needs_reply: needsReply },
-                      }),
-                    )
-                  }
+                  onClick={() => run(() => api(`/requests/${id}/comments`, { body: { text } }))}
                 >
-                  <Icon name="message" size={16} /> Написать
+                  <Icon name="message" size={16} /> Отправить сообщение
                 </button>
               )}
-              {request.actions.map((status) => (
-                <button
-                  key={status}
-                  disabled={busy}
-                  className={
-                    status === 'rejected' ? 'danger' : status === 'on_hold' ? '' : 'primary'
-                  }
-                  onClick={() =>
-                    run(() =>
-                      api(`/requests/${id}/status`, { body: { status, comment: text || null } }),
-                    )
-                  }
-                >
-                  {actionLabel(status)}
-                </button>
-              ))}
             </div>
-            {isAssignee && canComment && (
-              <label className="check muted" style={{ marginTop: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={needsReply}
-                  onChange={(e) => setNeedsReply(e.target.checked)}
-                />
-                Это вопрос заявителю — приостановить срок до ответа
-              </label>
-            )}
           </>
         ) : undefined
       }
     >
-      <p style={{ marginTop: 0, whiteSpace: 'pre-wrap' }}>{request.text}</p>
+      <StatusPath request={request} />
+      {request.my_turn ? (
+        <div className="notice notice-info turn-notice">
+          <Icon name="arrow" />
+          <span>
+            <strong>Ваш ход: {request.my_turn.toLowerCase()}.</strong>
+            <br />
+            Кнопки — внизу панели.
+          </span>
+        </div>
+      ) : (
+        situation(request) && <p className="muted">{situation(request)}</p>
+      )}
+
+      <p style={{ whiteSpace: 'pre-wrap' }}>{request.text}</p>
       {request.resolution && (
         <div className="notice notice-info">
           <Icon name="check" />
-          <span>{request.resolution}</span>
+          <span>
+            <strong>Отчёт исполнителя:</strong> {request.resolution}
+          </span>
         </div>
       )}
 
@@ -407,22 +502,39 @@ function RequestDrawer({
               style={{ width: `${Math.min(spent, 1) * 100}%` }}
             />
           </div>
-          {request.can_manage && !closed && (
-            <input
-              type="datetime-local"
-              style={{ marginTop: 8 }}
-              aria-label="Изменить срок"
-              onChange={(e) =>
-                e.target.value &&
-                run(() =>
-                  api(`/requests/${id}`, {
-                    method: 'PATCH',
-                    body: { due_at: new Date(e.target.value).toISOString() },
-                  }),
-                )
-              }
-            />
-          )}
+          {request.can_manage &&
+            !closed &&
+            (due === null ? (
+              <button className="ghost small" onClick={() => setDue('')}>
+                Изменить срок
+              </button>
+            ) : (
+              <div className="actions" style={{ marginTop: 8 }}>
+                <input
+                  type="datetime-local"
+                  aria-label="Новый срок"
+                  value={due}
+                  onChange={(e) => setDue(e.target.value)}
+                />
+                <button
+                  className="primary small"
+                  disabled={!due || busy}
+                  onClick={() =>
+                    run(() =>
+                      api(`/requests/${id}`, {
+                        method: 'PATCH',
+                        body: { due_at: new Date(due).toISOString() },
+                      }),
+                    )
+                  }
+                >
+                  Сохранить
+                </button>
+                <button className="ghost small" onClick={() => setDue(null)}>
+                  Отмена
+                </button>
+              </div>
+            ))}
         </dd>
         <dt>Исполнитель</dt>
         <dd>
@@ -671,21 +783,79 @@ function StatsView({ onFilter }: { onFilter: (status: string) => void }) {
   )
 }
 
+// Подписи этапов во множественном числе и короткое объяснение, что на этапе происходит
+const PIPELINE: [RequestStatus, string, string][] = [
+  ['new', 'Новые', 'ищем исполнителя'],
+  ['assigned', 'Назначены', 'исполнитель знает'],
+  ['in_progress', 'В работе', 'делают'],
+  ['on_hold', 'Ждут ответа', 'вопрос заявителю'],
+  ['done', 'Выполнены', 'ждут приёмки'],
+  ['closed', 'Закрыты', 'работа принята'],
+  ['rejected', 'Отклонены', 'или отозваны'],
+]
+
+function Pipeline({
+  requests,
+  value,
+  onChange,
+}: {
+  requests: OrgRequest[]
+  value: RequestStatus | null
+  onChange: (status: RequestStatus | null) => void
+}) {
+  return (
+    <div className="pipeline" role="group" aria-label="Этапы заявки">
+      {PIPELINE.map(([status, label, note], i) => {
+        const count = requests.filter((r) => r.status === status).length
+        return (
+          <Fragment key={status}>
+            {i > 0 && i < 6 && <Icon name="chevron" size={14} />}
+            {i === 6 && <span className="pipeline-gap" />}
+            <button
+              className={`pipeline-step ${value === status ? 'active' : ''}`}
+              style={{ '--step': STATUS_COLOR[status] } as CSSProperties}
+              aria-pressed={value === status}
+              onClick={() => onChange(value === status ? null : status)}
+            >
+              <strong>{count}</strong>
+              <span>{label}</span>
+              <small>{note}</small>
+            </button>
+          </Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
+const GROUPING_KEY = 'hr-edu-requests-grouping'
+
 export function Requests() {
   const user = useUser()
   const [params, setParams] = useSearchParams()
   const state = useApi<OrgRequest[]>('/requests')
   const meta = useApi<RequestMeta>('/requests/meta')
-  // Сотруднику сводка ни к чему — у него только свои заявки
-  const [tab, setTab] = useState<Tab>(user.role === 'employee' ? 'list' : 'dashboard')
+  // Сотруднику и хозяйственной службе сводка и доска ни к чему: заявок у них немного
+  const simple = user.role === 'employee' || user.role === 'executor'
+  const [tab, setTab] = useState<Tab>('tree')
+  const [grouping, setGrouping] = useState<Grouping>(() => {
+    const saved = localStorage.getItem(GROUPING_KEY) as Grouping | null
+    return saved ?? (simple ? 'status' : 'place')
+  })
   const [creating, setCreating] = useState(false)
   const [search, setSearch] = useState('')
-  const [status, setStatus] = useState('')
-  const [topic, setTopic] = useState('')
+  const [status, setStatus] = useState<RequestStatus | null>(null)
   const [mine, setMine] = useState(false)
+  const [overdue, setOverdue] = useState(false)
   const opened = Number(params.get('open')) || null
 
   const open = (id: number | null) => setParams(id ? { open: String(id) } : {}, { replace: true })
+
+  function changed() {
+    void state.reload()
+    // Счётчики в меню живут в другом компоненте — подскажем им обновиться
+    window.dispatchEvent(new Event('requests-changed'))
+  }
 
   // Данные обновляются сами: статусы меняются и без участия пользователя
   useEffect(() => {
@@ -693,59 +863,45 @@ export function Requests() {
     return () => clearInterval(timer)
   }, [state.reload])
 
-  const filtered = useMemo(() => {
+  useEffect(() => localStorage.setItem(GROUPING_KEY, grouping), [grouping])
+
+  const searched = useMemo(() => {
     const needle = search.trim().toLowerCase()
     return (state.data ?? []).filter((r) => {
-      if (status === 'overdue' ? !r.overdue : status && r.status !== status) return false
-      if (topic && r.topic !== topic) return false
-      if (mine && r.assignee?.id !== user.id && !r.is_author) return false
+      if (mine && !r.my_turn) return false
+      if (overdue && !r.overdue) return false
       if (!needle) return true
-      return `${r.id} ${r.title} ${r.text} ${r.organization}`.toLowerCase().includes(needle)
+      return `${r.id} ${r.title} ${r.text} ${r.organization} ${r.assignee?.name ?? ''}`
+        .toLowerCase()
+        .includes(needle)
     })
-  }, [state.data, search, status, topic, mine, user.id])
+  }, [state.data, search, mine, overdue])
 
-  const gantt: GanttItem[] = useMemo(
+  // Без выбранного этапа показываем то, что ещё не закрыто: архив только мешает
+  const filtered = useMemo(
     () =>
-      filtered
-        .filter((r) => r.due_at && (ACTIVE.includes(r.status) || r.status === 'done'))
-        .sort((a, b) => (a.assignee?.name ?? 'яя').localeCompare(b.assignee?.name ?? 'яя'))
-        .slice(0, 80)
-        .map((r) => {
-          const start = new Date(r.created_at).getTime()
-          const end = new Date(r.due_at as string).getTime()
-          return {
-            id: r.id,
-            label: r.title,
-            note: `№ ${r.id} · ${r.topic_title}`,
-            group: r.assignee?.name ?? 'Без исполнителя',
-            start: r.created_at,
-            end: r.due_at as string,
-            progress: r.status === 'done' ? 1 : (Date.now() - start) / Math.max(end - start, 1),
-            tone: r.overdue
-              ? 'red'
-              : r.status === 'done'
-                ? 'green'
-                : r.status === 'on_hold'
-                  ? 'amber'
-                  : 'blue',
-            tip: `${REQUEST_STATUS[r.status].label}${r.overdue ? ', просрочена' : ''} · ${r.organization}`,
-            onClick: () => open(r.id),
-          } satisfies GanttItem
-        }),
-    [filtered],
+      searched.filter((r) =>
+        status ? r.status === status : r.status !== 'closed' && r.status !== 'rejected',
+      ),
+    [searched, status],
   )
+  const myTurn = state.data?.filter((r) => r.my_turn).length ?? 0
+  const late = state.data?.filter((r) => r.overdue).length ?? 0
 
   const tabs: [Tab, string][] = [
-    ['dashboard', 'Дашборд'],
+    ['tree', 'Дерево'],
     ['board', 'Доска'],
-    ['list', 'Список'],
-    ['gantt', 'Сроки'],
+    ['stats', 'Сводка'],
   ]
 
   return (
     <Page
-      title="Заявки"
-      hint="От «починить мебель» до «нужна ставка логопеда». Тема, ответственный и срок определяются автоматически, статус меняется по ходу работы."
+      title={user.role === 'employee' ? 'Мои заявки' : 'Заявки'}
+      hint={
+        user.role === 'employee'
+          ? 'Опишите, что нужно сделать, — исполнителя и срок система подберёт сама. Здесь видно, на каком этапе каждая ваша заявка.'
+          : 'Каждая заявка проходит путь слева направо. Нажмите на этап, чтобы увидеть только его заявки, или на заявку, чтобы открыть её.'
+      }
       actions={
         user.role !== 'observer' &&
         meta.data && (
@@ -755,62 +911,71 @@ export function Requests() {
         )
       }
     >
-      <Tabs
-        value={tab}
-        onChange={setTab}
-        tabs={user.role === 'employee' ? tabs.filter(([key]) => key !== 'dashboard') : tabs}
-      />
+      {!simple && <Tabs value={tab} onChange={setTab} tabs={tabs} />}
 
-      {tab === 'dashboard' ? (
+      {tab === 'stats' ? (
         <StatsView
-          onFilter={(value) => {
-            setStatus(value)
-            setTab('list')
+          onFilter={() => {
+            setStatus(null)
+            setOverdue(true)
+            setTab('tree')
           }}
         />
       ) : (
         <>
+          <Pipeline requests={searched} value={status} onChange={setStatus} />
+
           <div className="toolbar">
+            <button
+              className={`chip ${mine ? 'chip-on' : ''}`}
+              aria-pressed={mine}
+              onClick={() => setMine(!mine)}
+            >
+              Ждут меня · {myTurn}
+            </button>
+            <button
+              className={`chip ${overdue ? 'chip-on chip-late' : ''}`}
+              aria-pressed={overdue}
+              onClick={() => setOverdue(!overdue)}
+            >
+              Просрочены · {late}
+            </button>
             <input
               type="search"
-              placeholder="Поиск по номеру, тексту, учреждению"
+              placeholder="Поиск: номер, текст, учреждение, исполнитель"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <select value={status} onChange={(e) => setStatus(e.target.value)}>
-              <option value="">Все статусы</option>
-              <option value="overdue">Просроченные</option>
-              {meta.data?.statuses.map((s) => (
-                <option key={s.code} value={s.code}>
-                  {s.title}
-                </option>
-              ))}
-            </select>
-            <select value={topic} onChange={(e) => setTopic(e.target.value)}>
-              <option value="">Все темы</option>
-              {meta.data?.topics.map((t) => (
-                <option key={t.code} value={t.code}>
-                  {t.title}
-                </option>
-              ))}
-            </select>
-            {user.role !== 'employee' && (
-              <label className="check">
-                <input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />
-                Только мои
-              </label>
+            {tab === 'tree' && (
+              <select
+                value={grouping}
+                onChange={(e) => setGrouping(e.target.value as Grouping)}
+                aria-label="Группировка"
+              >
+                {GROUPINGS.map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+              </select>
             )}
             <span className="spacer" />
-            <span className="muted">Найдено: {filtered.length}</span>
+            <span className="muted">
+              {status ? PIPELINE.find(([s]) => s === status)?.[1] : 'Открытые'}: {filtered.length}
+            </span>
           </div>
 
           <Async state={state}>
             {() =>
               filtered.length === 0 ? (
-                <Empty>Заявок нет. Создайте первую — кнопка справа вверху.</Empty>
+                <Empty>
+                  {state.data?.length
+                    ? 'Под выбранные условия заявок нет. Снимите фильтр или выберите другой этап.'
+                    : 'Заявок пока нет. Чтобы создать первую, нажмите «Новая заявка» справа вверху.'}
+                </Empty>
               ) : tab === 'board' ? (
                 <div className="board wide">
-                  {BOARD.map((column) => {
+                  {(status ? [status] : BOARD).map((column) => {
                     const items = filtered.filter((r) => r.status === column)
                     return (
                       <div key={column} className="board-column">
@@ -824,64 +989,17 @@ export function Requests() {
                             onOpen={() => open(request.id)}
                           />
                         ))}
+                        {items.length > 40 && (
+                          <p className="muted">
+                            и ещё {items.length - 40} — удобнее смотреть в дереве
+                          </p>
+                        )}
                       </div>
                     )
                   })}
                 </div>
-              ) : tab === 'gantt' ? (
-                <Card title="Заявки на шкале времени">
-                  <p className="card-sub">
-                    Полоса — от создания до срока, заливка — сколько срока уже прошло. Красные
-                    просрочены.
-                  </p>
-                  <Gantt items={gantt} empty="Нет открытых заявок со сроком" />
-                </Card>
               ) : (
-                <Card>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>№</th>
-                        <th>Заявка</th>
-                        <th>Статус</th>
-                        <th>Исполнитель</th>
-                        <th>Срок</th>
-                        <th>Создана</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filtered.slice(0, 300).map((r) => (
-                        <tr key={r.id} className="clickable" onClick={() => open(r.id)}>
-                          <td className="muted">{r.id}</td>
-                          <td>
-                            <strong>{r.title}</strong>
-                            <div className="muted">
-                              {r.topic_title} · {r.organization}
-                            </div>
-                          </td>
-                          <td>
-                            <div className="chips">
-                              <Badge tone={REQUEST_STATUS[r.status].tone}>
-                                {REQUEST_STATUS[r.status].label}
-                              </Badge>
-                              {r.kind !== 'planned' && (
-                                <Badge tone={REQUEST_KIND[r.kind].tone}>
-                                  {REQUEST_KIND[r.kind].label}
-                                </Badge>
-                              )}
-                            </div>
-                          </td>
-                          <td>{r.assignee?.name ?? <span className="muted">не назначен</span>}</td>
-                          <td className="nowrap">
-                            {r.due_at ? fmtDateTime(r.due_at) : '—'}
-                            {r.overdue && <div className="delta-minus">просрочена</div>}
-                          </td>
-                          <td className="nowrap muted">{fmtDateTime(r.created_at)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </Card>
+                <RequestTree requests={filtered} grouping={grouping} onOpen={open} />
               )
             }
           </Async>
@@ -893,19 +1011,14 @@ export function Requests() {
           meta={meta.data}
           onClose={() => setCreating(false)}
           onCreated={(request) => {
-            void state.reload()
-            if (tab === 'dashboard') setTab('board')
+            changed()
+            if (tab === 'stats') setTab('tree')
             open(request.id)
           }}
         />
       )}
       {opened && (
-        <RequestDrawer
-          key={opened}
-          id={opened}
-          onClose={() => open(null)}
-          onChanged={() => void state.reload()}
-        />
+        <RequestDrawer key={opened} id={opened} onClose={() => open(null)} onChanged={changed} />
       )}
     </Page>
   )

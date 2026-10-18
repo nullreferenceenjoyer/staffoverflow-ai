@@ -55,8 +55,11 @@ WORK_TRANSITIONS: dict[str, tuple[str, ...]] = {
     S.on_hold: (S.in_progress, S.done, S.rejected),
     S.done: (S.in_progress, S.closed),
 }
-# Что может сам заявитель: принять работу или вернуть её
-AUTHOR_TRANSITIONS: dict[str, tuple[str, ...]] = {S.done: (S.closed, S.in_progress)}
+# Что может сам заявитель: отозвать открытую заявку, принять работу или вернуть её
+AUTHOR_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    **{status: (S.rejected,) for status in ACTIVE},
+    S.done: (S.closed, S.in_progress),
+}
 
 # Если у адресата по теме нет учётной записи, заявка поднимается выше
 FALLBACK_ROLES = {
@@ -121,6 +124,26 @@ def can_manage(user: User, request: IncomingRequest) -> bool:
         mine = (Role.executor,) if user.role == Role.executor else (Role.executor, Role.director)
         return same_org and request.routed_role in mine
     return False
+
+
+def my_turn(user: User, request: IncomingRequest) -> str | None:
+    """Что сейчас должен сделать именно этот пользователь, или None, если ход не за ним.
+
+    Отсюда берутся счётчик «ждут вас» в меню и подсказка в карточке заявки.
+    """
+    if request.author_id == user.id:
+        if request.status == S.on_hold:
+            return "Ответьте на вопрос исполнителя"
+        if request.status == S.done:
+            return "Проверьте работу и примите её"
+    if request.assignee_id == user.id:
+        if request.status == S.assigned:
+            return "Возьмите заявку в работу"
+        if request.status == S.in_progress:
+            return "Выполните и напишите отчёт"
+    if request.status == S.new and request.assignee_id is None and can_manage(user, request):
+        return "Назначьте исполнителя"
+    return None
 
 
 def candidates(db: Session, request: IncomingRequest, role: str) -> list[User]:
@@ -254,7 +277,9 @@ def change_status(db: Session, request: IncomingRequest, actor: User, status: st
         raise Forbidden(f"Из статуса «{STATUS_TITLES[request.status]}» нельзя перевести "
                         f"в «{STATUS_TITLES[status]}»")
     comment = (comment or "").strip()
-    if status in (S.rejected, S.on_hold) and not comment:
+    # Заявитель может отозвать свою заявку без объяснений, остальным нужна причина
+    withdrawn = status == S.rejected and is_author and request.status in ACTIVE
+    if (status == S.on_hold or (status == S.rejected and not withdrawn)) and not comment:
         raise Forbidden("Напишите причину — заявитель должен понимать, что происходит")
     if status == S.in_progress and request.status == S.done and not comment:
         raise Forbidden("Напишите, что именно не сделано")
@@ -267,7 +292,12 @@ def change_status(db: Session, request: IncomingRequest, actor: User, status: st
     _set_status(request, status, moment)
     if status == S.done:
         request.resolution = comment or request.resolution
-    title = "Возвращена в работу" if returned else STATUS_TITLES[status]
+    if returned:
+        title = "Возвращена в работу"
+    elif withdrawn:
+        title = "Отозвана заявителем"
+    else:
+        title = STATUS_TITLES[status]
     log(request, actor, "status", f"{title}. {comment}" if comment else title, moment)
     notify(db, request, [request.author, request.assignee],
            title.lower() + (f" — {comment[:200]}" if comment else ""), skip=actor)

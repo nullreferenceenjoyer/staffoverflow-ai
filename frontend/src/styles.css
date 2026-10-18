@@ -555,8 +555,17 @@ input[type='range'] {
   animation: fade 0.3s;
 }
 
-.nav-count {
+.nav-counts {
+  display: flex;
+  gap: 4px;
   margin-left: auto;
+}
+
+.nav-count.mine {
+  background: var(--primary);
+}
+
+.nav-count {
   padding: 0 7px;
   border-radius: 9px;
   background: var(--critical);
@@ -2220,6 +2229,289 @@ a.note {
   box-shadow: 0 0 0 3px var(--ring);
 }
 
+/* этапы заявки сверху страницы: и подсказка, как всё устроено, и фильтр */
+.pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  color: var(--muted);
+}
+
+.pipeline-step {
+  flex: 1 1 110px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  min-width: 104px;
+  padding: 9px 12px 9px 14px;
+  border-color: var(--border);
+  border-left: 4px solid var(--step);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  white-space: normal;
+}
+
+.pipeline-step strong {
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.pipeline-step span {
+  font-size: 13px;
+}
+
+.pipeline-step small {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.pipeline-step.active {
+  border-color: var(--step);
+  background: color-mix(in srgb, var(--step) 12%, var(--surface));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--step) 25%, transparent);
+}
+
+.pipeline-gap {
+  width: 10px;
+}
+
+.chip-on {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.chip-on.chip-late {
+  border-color: var(--critical);
+  background: var(--critical-soft);
+  color: var(--critical);
+}
+
+/* дерево заявок */
+.tree {
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.tree-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 4px 4px;
+}
+
+.tree-tools button.small {
+  margin-top: 0;
+}
+
+.tree-children {
+  margin-left: 17px;
+  padding-left: 10px;
+  border-left: 1px dashed var(--border-strong);
+}
+
+.tree-row,
+.tree-leaf {
+  width: 100%;
+  border-color: transparent;
+  background: none;
+  text-align: left;
+}
+
+.tree-row:hover:not(:disabled),
+.tree-leaf:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-3);
+  box-shadow: none;
+  transform: none;
+}
+
+.tree-row {
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.tree-chevron {
+  display: inline-flex;
+  color: var(--muted);
+  transition: transform 0.2s var(--ease);
+}
+
+.tree-chevron.open {
+  transform: rotate(90deg);
+}
+
+.tree-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.statusbar.mini {
+  flex: none;
+  width: 110px;
+  height: 7px;
+}
+
+.tree-nums {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 230px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tree-leaf {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto 190px 150px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  font-weight: 400;
+  white-space: normal;
+}
+
+.tree-leaf.mine {
+  border-left-color: var(--primary);
+}
+
+.tree-leaf.overdue {
+  border-left-color: var(--critical);
+}
+
+.tree-leaf-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tree-leaf-main strong {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-leaf-main .muted {
+  font-size: 12.5px;
+}
+
+.tree-leaf .turn {
+  color: var(--primary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.tree-leaf-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.tree-leaf-due {
+  font-size: 12.5px;
+  text-align: right;
+}
+
+.tree-leaf .late,
+.tree-leaf-due.late {
+  color: var(--critical);
+  font-weight: 600;
+}
+
+.tree-more {
+  margin: 4px 0 6px 10px;
+}
+
+/* путь заявки в карточке */
+.steps {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.steps li {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.steps li::before {
+  content: '';
+  position: absolute;
+  top: 11px;
+  right: 50%;
+  left: -50%;
+  height: 2px;
+  background: var(--border);
+}
+
+.steps li:first-child::before {
+  display: none;
+}
+
+.steps li.passed::before,
+.steps li.current::before {
+  background: var(--primary);
+}
+
+.step-dot {
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.steps li.passed .step-dot {
+  background: var(--primary);
+  color: #fff;
+}
+
+.steps li.current {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.steps li.current .step-dot {
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 2px var(--primary);
+  color: var(--primary);
+}
+
+.turn-notice {
+  align-items: flex-start;
+}
+
 /* --- база знаний --- */
 
 .search {
@@ -2494,5 +2786,21 @@ a.note {
 
   .board {
     grid-template-columns: 1fr;
+  }
+
+  .tree-leaf {
+    grid-template-columns: 10px minmax(0, 1fr);
+  }
+
+  .tree-leaf-side,
+  .tree-leaf-due,
+  .tree-nums .muted,
+  .statusbar.mini {
+    display: none;
+  }
+
+  .tree-nums {
+    min-width: 0;
+    margin-left: auto;
   }
 }

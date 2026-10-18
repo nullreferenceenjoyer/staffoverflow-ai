@@ -450,6 +450,7 @@ export interface OrgRequest {
   status: RequestStatus
   organization_id: number
   organization: string
+  municipality: string
   building_id: number | null
   building: string | null
   location: string | null
@@ -468,6 +469,8 @@ export interface OrgRequest {
   can_manage: boolean
   is_author: boolean
   actions: RequestStatus[]
+  /** Что сейчас должен сделать текущий пользователь; null — ход не за ним. */
+  my_turn: string | null
   events?: {
     id: number
     kind: 'comment' | 'status' | 'assignee' | 'deadline'
@@ -492,6 +495,7 @@ export interface RequestStats {
   unassigned: number
   overdue: number
   waiting_confirmation: number
+  my_turn: number
   resolved: number
   in_time_pct: number | null
   avg_hours: number | null

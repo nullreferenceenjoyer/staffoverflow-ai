@@ -33,36 +33,41 @@ interface NavItem {
   to: string
   label: string
   icon: IconName
-  adminOnly?: boolean
+  // Кому пункт показывать; без списка — всем, кому доступна аналитика
+  roles?: User['role'][]
 }
 
+const PLANNERS: User['role'][] = ['admin', 'regional_analyst', 'municipal_specialist', 'observer']
+
+// Сначала повседневная работа, потом анализ и справочники. Лишнее для роли не показываем:
+// директору незачем паспорт проекта муниципалитета и сценарии централизации.
 const NAV: [group: string, items: NavItem[]][] = [
-  [
-    'Анализ',
-    [
-      { to: '/', label: 'Обзор', icon: 'grid' },
-      { to: '/workload', label: 'Загрузка персонала', icon: 'gauge' },
-      { to: '/analytics', label: 'Отклонения', icon: 'bars' },
-      { to: '/centralization', label: 'Централизация', icon: 'layers' },
-      { to: '/organizations', label: 'Учреждения', icon: 'building' },
-    ],
-  ],
   [
     'Работа',
     [
+      { to: '/', label: 'Обзор', icon: 'grid' },
       { to: '/requests', label: 'Заявки', icon: 'inbox' },
-      { to: '/projects', label: 'Проекты', icon: 'folder' },
       { to: '/workflow', label: 'Задачи', icon: 'tasks' },
-      { to: '/program', label: 'Паспорт проекта', icon: 'target' },
+      { to: '/projects', label: 'Проекты штатных', icon: 'folder' },
+    ],
+  ],
+  [
+    'Анализ',
+    [
+      { to: '/workload', label: 'Загрузка персонала', icon: 'gauge' },
+      { to: '/analytics', label: 'Отклонения', icon: 'bars' },
+      { to: '/centralization', label: 'Централизация', icon: 'layers', roles: PLANNERS },
+      { to: '/program', label: 'Паспорт проекта', icon: 'target', roles: PLANNERS },
+      { to: '/organizations', label: 'Учреждения', icon: 'building' },
     ],
   ],
   [
     'Справочники',
     [
-      { to: '/norms', label: 'Нормативы', icon: 'sliders' },
-      { to: '/knowledge', label: 'База знаний', icon: 'book' },
       { to: '/assistant', label: 'Помощник', icon: 'sparkles' },
-      { to: '/admin', label: 'Администрирование', icon: 'shield', adminOnly: true },
+      { to: '/knowledge', label: 'База знаний', icon: 'book' },
+      { to: '/norms', label: 'Нормативы', icon: 'sliders' },
+      { to: '/admin', label: 'Администрирование', icon: 'shield', roles: ['admin'] },
     ],
   ],
 ]
@@ -151,8 +156,18 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [theme, toggleTheme] = useTheme()
   const location = useLocation()
   const service = isServiceRole(user)
-  // Счётчик просроченных заявок в меню — чтобы о них не нужно было вспоминать
+  // Счётчики заявок в меню — чтобы о них не нужно было вспоминать
   const requests = useApi<RequestStats>('/requests/stats')
+  const reloadRequests = requests.reload
+  useEffect(() => {
+    const reload = () => void reloadRequests()
+    const timer = setInterval(reload, 60_000)
+    window.addEventListener('requests-changed', reload)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('requests-changed', reload)
+    }
+  }, [reloadRequests])
   const groups = service ? SERVICE_NAV : NAV
   const home = service ? '/requests' : '/'
 
@@ -173,16 +188,25 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
             <div key={group}>
               <div className="nav-group">{group}</div>
               {items
-                .filter((item) => !item.adminOnly || user.role === 'admin')
+                .filter((item) => !item.roles || item.roles.includes(user.role))
                 .map((item) => (
                   <NavLink key={item.to} to={item.to} end={item.to === '/'}>
                     <Icon name={item.icon} />
                     {item.label}
-                    {item.to === '/requests' && requests.data?.overdue ? (
-                      <span className="nav-count" title="Просрочено">
-                        {requests.data.overdue}
+                    {item.to === '/requests' && requests.data && (
+                      <span className="nav-counts">
+                        {requests.data.my_turn > 0 && (
+                          <span className="nav-count mine" title="Ждут ваших действий">
+                            {requests.data.my_turn}
+                          </span>
+                        )}
+                        {requests.data.overdue > 0 && (
+                          <span className="nav-count" title="Просрочено">
+                            {requests.data.overdue}
+                          </span>
+                        )}
                       </span>
-                    ) : null}
+                    )}
                   </NavLink>
                 ))}
             </div>
