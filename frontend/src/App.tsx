@@ -4,22 +4,10 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'reac
 import { api, getToken, Notification, RequestStats, setToken, User } from './api'
 import { Icon, IconName } from './components/icons'
 import { Avatar } from './components/ui'
-import { fmtDateTime, isServiceRole, ROLE_LABELS, useApi } from './lib'
-import { Analytics } from './pages/Analytics'
+import { fmtDateTime, ROLE_LABELS, useApi } from './lib'
 import { Admin } from './pages/Admin'
-import { Assistant } from './pages/Assistant'
-import { Centralization } from './pages/Centralization'
-import { DashboardPage } from './pages/Dashboard'
-import { Knowledge } from './pages/Knowledge'
 import { Login } from './pages/Login'
-import { Norms } from './pages/Norms'
-import { OrganizationPage } from './pages/Organization'
-import { Organizations } from './pages/Organizations'
-import { ProgramPage } from './pages/Program'
-import { ProjectPage, Projects } from './pages/Projects'
 import { Requests } from './pages/Requests'
-import { Workflow } from './pages/Workflow'
-import { Workload } from './pages/Workload'
 
 const UserContext = createContext<User | null>(null)
 
@@ -33,46 +21,14 @@ interface NavItem {
   to: string
   label: string
   icon: IconName
-  // Кому пункт показывать; без списка — всем, кому доступна аналитика
+  // Кому пункт показывать; без списка — всем
   roles?: User['role'][]
 }
 
-const PLANNERS: User['role'][] = ['admin', 'regional_analyst', 'municipal_specialist', 'observer']
-
-// Сначала повседневная работа, потом анализ и справочники. Лишнее для роли не показываем:
-// директору незачем паспорт проекта муниципалитета и сценарии централизации.
-const NAV: [group: string, items: NavItem[]][] = [
-  [
-    'Работа',
-    [
-      { to: '/', label: 'Обзор', icon: 'grid' },
-      { to: '/requests', label: 'Заявки', icon: 'inbox' },
-      { to: '/workflow', label: 'Задачи', icon: 'tasks' },
-      { to: '/projects', label: 'Проекты штатных', icon: 'folder' },
-    ],
-  ],
-  [
-    'Анализ',
-    [
-      { to: '/workload', label: 'Загрузка персонала', icon: 'gauge' },
-      { to: '/analytics', label: 'Отклонения', icon: 'bars' },
-      { to: '/centralization', label: 'Централизация', icon: 'layers', roles: PLANNERS },
-      { to: '/program', label: 'Паспорт проекта', icon: 'target', roles: PLANNERS },
-      { to: '/organizations', label: 'Учреждения', icon: 'building' },
-    ],
-  ],
-  [
-    'Справочники',
-    [
-      { to: '/assistant', label: 'Помощник', icon: 'sparkles' },
-      { to: '/knowledge', label: 'База знаний', icon: 'book' },
-      { to: '/norms', label: 'Нормативы', icon: 'sliders' },
-      { to: '/admin', label: 'Администрирование', icon: 'shield', roles: ['admin'] },
-    ],
-  ],
+const NAV: NavItem[] = [
+  { to: '/requests', label: 'Заявки', icon: 'inbox' },
+  { to: '/admin', label: 'Администрирование', icon: 'shield', roles: ['admin'] },
 ]
-// Сотруднику и хозяйственной службе доступны только заявки
-const SERVICE_NAV: typeof NAV = [['Работа', [{ to: '/requests', label: 'Заявки', icon: 'inbox' }]]]
 
 const THEME_KEY = 'hr-edu-theme'
 
@@ -121,7 +77,6 @@ function Notifications() {
   function follow(note: Notification) {
     setOpen(false)
     if (note.request_id) navigate(`/requests?open=${note.request_id}`)
-    else if (note.task_id) navigate('/workflow')
   }
 
   return (
@@ -136,7 +91,7 @@ function Notifications() {
             state.data.map((n) => (
               <div
                 key={n.id}
-                className={`note ${n.read_at ? '' : 'unread'} ${n.request_id || n.task_id ? 'clickable' : ''}`}
+                className={`note ${n.read_at ? '' : 'unread'} ${n.request_id ? 'clickable' : ''}`}
                 onClick={() => follow(n)}
               >
                 <div>{n.text}</div>
@@ -155,7 +110,9 @@ function Notifications() {
 function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [theme, toggleTheme] = useTheme()
   const location = useLocation()
-  const service = isServiceRole(user)
+  // На узком экране меню выезжает поверх страницы и закрывается после перехода
+  const [menuOpen, setMenuOpen] = useState(false)
+  useEffect(() => setMenuOpen(false), [location.pathname])
   // Счётчики заявок в меню — чтобы о них не нужно было вспоминать
   const requests = useApi<RequestStats>('/requests/stats')
   const reloadRequests = requests.reload
@@ -168,48 +125,49 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
       window.removeEventListener('requests-changed', reload)
     }
   }, [reloadRequests])
-  const groups = service ? SERVICE_NAV : NAV
-  const home = service ? '/requests' : '/'
+  const items = NAV.filter((item) => !item.roles || item.roles.includes(user.role))
+  const waiting = (requests.data?.my_turn ?? 0) + (requests.data?.overdue ?? 0)
 
   return (
-    <div className="layout">
-      <aside className="sidebar">
+    <div className={`layout ${menuOpen ? 'menu-open' : ''}`}>
+      <div className="sidebar-backdrop" onClick={() => setMenuOpen(false)} />
+      <aside className="sidebar" aria-label="Меню">
         <div className="brand">
           <span className="brand-mark">
-            <Icon name="users" />
+            <Icon name="inbox" />
           </span>
           <div>
-            Кадровый потенциал
+            Заявки
             <small>образовательных учреждений</small>
           </div>
+          <button
+            className="ghost icon menu-close"
+            onClick={() => setMenuOpen(false)}
+            aria-label="Закрыть меню"
+          >
+            <Icon name="x" />
+          </button>
         </div>
         <nav>
-          {groups.map(([group, items]) => (
-            <div key={group}>
-              <div className="nav-group">{group}</div>
-              {items
-                .filter((item) => !item.roles || item.roles.includes(user.role))
-                .map((item) => (
-                  <NavLink key={item.to} to={item.to} end={item.to === '/'}>
-                    <Icon name={item.icon} />
-                    {item.label}
-                    {item.to === '/requests' && requests.data && (
-                      <span className="nav-counts">
-                        {requests.data.my_turn > 0 && (
-                          <span className="nav-count mine" title="Ждут ваших действий">
-                            {requests.data.my_turn}
-                          </span>
-                        )}
-                        {requests.data.overdue > 0 && (
-                          <span className="nav-count" title="Просрочено">
-                            {requests.data.overdue}
-                          </span>
-                        )}
-                      </span>
-                    )}
-                  </NavLink>
-                ))}
-            </div>
+          {items.map((item) => (
+            <NavLink key={item.to} to={item.to}>
+              <Icon name={item.icon} />
+              {item.label}
+              {item.to === '/requests' && requests.data && (
+                <span className="nav-counts">
+                  {requests.data.my_turn > 0 && (
+                    <span className="nav-count mine" title="Ждут ваших действий">
+                      {requests.data.my_turn}
+                    </span>
+                  )}
+                  {requests.data.overdue > 0 && (
+                    <span className="nav-count" title="Просрочено">
+                      {requests.data.overdue}
+                    </span>
+                  )}
+                </span>
+              )}
+            </NavLink>
           ))}
         </nav>
         <div className="sidebar-foot">
@@ -226,6 +184,19 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
       <div className="content">
         <div className="topbar">
           <button
+            className="ghost icon menu-toggle"
+            onClick={() => setMenuOpen(true)}
+            aria-label="Открыть меню"
+            aria-expanded={menuOpen}
+          >
+            <Icon name="menu" />
+            {waiting > 0 && <span className="menu-dot" />}
+          </button>
+          <span className="topbar-title">
+            {items.find((item) => location.pathname.startsWith(item.to))?.label ?? 'Заявки'}
+          </span>
+          <span className="spacer" />
+          <button
             className="ghost icon"
             onClick={toggleTheme}
             aria-label="Сменить тему"
@@ -239,25 +210,8 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
         <main key={location.pathname.split('/')[1]}>
           <Routes>
             <Route path="/requests" element={<Requests />} />
-            {!service && (
-              <>
-                <Route path="/" element={<DashboardPage />} />
-                <Route path="/workload" element={<Workload />} />
-                <Route path="/organizations" element={<Organizations />} />
-                <Route path="/organizations/:id" element={<OrganizationPage />} />
-                <Route path="/analytics" element={<Analytics />} />
-                <Route path="/centralization" element={<Centralization />} />
-                <Route path="/program" element={<ProgramPage />} />
-                <Route path="/projects" element={<Projects />} />
-                <Route path="/projects/:id" element={<ProjectPage />} />
-                <Route path="/workflow" element={<Workflow />} />
-                <Route path="/norms" element={<Norms />} />
-                <Route path="/knowledge" element={<Knowledge />} />
-                <Route path="/assistant" element={<Assistant />} />
-              </>
-            )}
             {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}
-            <Route path="*" element={<Navigate to={home} replace />} />
+            <Route path="*" element={<Navigate to="/requests" replace />} />
           </Routes>
         </main>
       </div>

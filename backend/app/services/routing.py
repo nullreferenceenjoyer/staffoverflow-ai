@@ -19,36 +19,33 @@ class Topic:
     role: Role  # кому заявка уходит по умолчанию
     keywords: tuple[str, ...]  # для разбора без модели
     days: int = 5  # срок плановой заявки, календарных дней
-    # Функция штатного расписания, которая выполняет такие заявки. По ней заявки
-    # попадают в анализ загрузки хозяйственной службы.
-    function_code: str | None = None
 
 
 TOPICS: dict[str, Topic] = {
     "furniture": Topic("Мебель и инвентарь", Role.executor,
                        ("мебел", "парт", "стул", "шкаф", "стол", "полк", "дверц", "доск",
-                        "скамь", "кроват", "тумб"), 7, "maintenance"),
+                        "скамь", "кроват", "тумб"), 7),
     "plumbing": Topic("Сантехника и отопление", Role.executor,
                       ("кран", "течет", "течь", "протечк", "унитаз", "раковин", "батаре",
-                       "отоплен", "канализац", "засор", "труб", "смесител"), 3, "maintenance"),
+                       "отоплен", "канализац", "засор", "труб", "смесител"), 3),
     "electrical": Topic("Электрика и освещение", Role.executor,
                         ("ламп", "свет", "розетк", "выключател", "электри", "проводк",
-                         "щиток", "искрит"), 3, "maintenance"),
+                         "щиток", "искрит"), 3),
     "repair": Topic("Ремонт помещений", Role.executor,
                     ("покрас", "штукатур", "линолеум", "окн", "стекл", "замок", "двер",
-                     "потол", "ремонт", "плитк"), 14, "maintenance"),
+                     "потол", "ремонт", "плитк"), 14),
     "cleaning": Topic("Уборка и территория", Role.executor,
                       ("уборк", "убрать", "мусор", "грязь", "снег", "налед", "территор",
-                       "вывоз"), 2, "cleaning"),
+                       "вывоз"), 2),
     "it": Topic("Компьютеры и связь", Role.executor,
                 ("компьютер", "ноутбук", "принтер", "проектор", "интернет", "wi-fi", "вайфай",
-                 "картридж", "монитор", "не печатает", "электронн журнал"), 3, "it"),
+                 "картридж", "монитор", "не печатает", "электронн журнал"), 3),
     "supplies": Topic("Снабжение и расходные материалы", Role.executor,
                       ("закупить", "приобрести", "канцеляр", "бумаг", "моющ", "расходн",
-                       "закончил"), 10, "facility_manager"),
+                       "закончил"), 10),
     "safety": Topic("Безопасность и доступ", Role.director,
                     ("пропуск", "турникет", "видеонаблюд", "камер", "тревожн", "огнетушител",
-                     "пожарн", "ключ", "эваку"), 3, "security"),
+                     "пожарн", "ключ", "эваку"), 3),
     "staff_increase": Topic("Дополнительные ставки", Role.municipal_specialist,
                             ("нужна ставк", "дополнительн", "не хватает", "нехватк",
                              "ввести ставк", "выделить ставк", "увеличить штат"), 14),
@@ -70,9 +67,22 @@ TOPICS: dict[str, Topic] = {
 _PROMPT = """Определи тему заявки от сотрудника образовательного учреждения. Темы:
 {topics}
 
-Ответь одним JSON-объектом вида {{"topic": "<код темы>"}} без пояснений.
+Если это хозяйственная работа (мебель, сантехника, электрика, ремонт, уборка,
+техника, снабжение), оцени, сколько часов она займёт у одного мастера, с учётом
+объёма. Иначе hours — null.
+
+Ответь одним JSON-объектом вида {{"topic": "<код темы>", "hours": <число или null>}}
+без пояснений.
 
 Заявка: {text}"""
+
+
+@dataclass(frozen=True)
+class Classification:
+    topic: str
+    role: Role
+    by: str  # llm | rules
+    hours: float | None = None  # оценка модели, если она её дала
 
 
 def classify_by_rules(text: str) -> str:
@@ -85,21 +95,28 @@ def classify_by_rules(text: str) -> str:
     return best if scores[best] else "other"
 
 
-def classify(text: str) -> tuple[str, Role, str]:
-    """Возвращает (тема, роль адресата, чем классифицировано: llm | rules)."""
+def _hours(value) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify(text: str) -> Classification:
+    """Тема, адресат и, если модель её дала, оценка часов работы."""
     topics = "\n".join(f"- {code}: {topic.title}" for code, topic in TOPICS.items())
     try:
-        # Текст заявки свободный и может содержать ФИО — только локальная модель
         reply = llm.complete(
             [{"role": "user", "content": _PROMPT.format(topics=topics, text=text[:1500])}],
-            sensitive=True, max_tokens=40,
+            max_tokens=60,
         )
         match = re.search(r"\{.*?\}", reply, re.S)
-        topic = json.loads(match.group(0)).get("topic") if match else None
+        data = json.loads(match.group(0)) if match else {}
+        topic = data.get("topic") if isinstance(data, dict) else None
         if topic in TOPICS:
-            return topic, TOPICS[topic].role, "llm"
+            return Classification(topic, TOPICS[topic].role, "llm", _hours(data.get("hours")))
         log.info("LLM returned unknown topic %r, using rules", reply[:80])
     except (llm.LLMUnavailable, ValueError):
         pass
     topic = classify_by_rules(text)
-    return topic, TOPICS[topic].role, "rules"
+    return Classification(topic, TOPICS[topic].role, "rules")

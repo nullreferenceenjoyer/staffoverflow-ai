@@ -52,8 +52,9 @@ function levelsFor(grouping: Grouping, requests: OrgRequest[]): Level[] {
   if (grouping === 'assignee') {
     return [
       {
-        key: (r) => String(r.assignee?.id ?? 'none'),
-        label: (r) => r.assignee?.name ?? 'Без исполнителя',
+        key: (r) => (r.assignee ? `u${r.assignee.id}` : r.brigade ? `b${r.brigade.id}` : 'none'),
+        label: (r) =>
+          r.assignee?.name ?? (r.brigade ? `Бригада «${r.brigade.name}»` : 'Без исполнителя'),
         icon: 'user',
       },
     ]
@@ -180,6 +181,10 @@ function Leaf({ request, onOpen }: { request: OrgRequest; onOpen: (id: number) =
         {request.assignee ? (
           <>
             <Avatar name={request.assignee.name} small /> {request.assignee.name}
+          </>
+        ) : request.brigade ? (
+          <>
+            <Icon name="truck" size={14} /> {request.brigade.name}
           </>
         ) : (
           <span className="late">нет исполнителя</span>

@@ -11,9 +11,6 @@ class Settings(BaseSettings):
 
     secret_key: str = "dev-only-secret-key-change-it-before-deploy"
     access_token_ttl_min: int = 480
-    # Соль для хэширования ФИО при импорте. Меняется один раз при установке:
-    # после смены старые идентификаторы сотрудников перестанут совпадать с новыми.
-    pii_hash_salt: str = "dev-salt-change-me"
 
     admin_email: str = "admin@example.ru"
     admin_password: str = "admin"
@@ -23,9 +20,7 @@ class Settings(BaseSettings):
     seed_dir: str = str(Path(__file__).resolve().parents[2] / "seed")
     seed_file: str = ""
 
-    storage_dir: str = "/data/storage"
-
-    # Локальная LLM (любой OpenAI-совместимый сервер: llama.cpp, LM Studio, Ollama)
+    # Локальная модель для темы заявки (OpenAI-совместимый сервер: llama.cpp, LM Studio, Ollama)
     llm_base_url: str = ""
     llm_model: str = "local"
     llm_api_key: str = ""
@@ -35,37 +30,16 @@ class Settings(BaseSettings):
     # Qwen3 и похожие модели по умолчанию «думают» вслух; на CPU это дорого
     llm_disable_thinking: bool = True
 
-    # Облачная модель — только для запросов без персональных данных, по умолчанию выключена
-    cloud_llm_enabled: bool = False
-    cloud_llm_base_url: str = ""
-    cloud_llm_model: str = ""
-    cloud_llm_api_key: str = ""
-
-    # hashing — встроенный офлайн-эмбеддер; openai — внешний /v1/embeddings
-    embedding_backend: str = "hashing"
-    embedding_base_url: str = ""
-    embedding_model: str = ""
-
-    telegram_bot_token: str = ""
-    max_bot_token: str = ""
-    max_api_url: str = "https://platform-api.max.ru"
+    # Заявки: как часто проверять сроки, за сколько часов до срока напоминать
+    # исполнителю и через сколько дней выполненная заявка закрывается сама,
+    # если заявитель не ответил
     deadline_check_interval_min: int = 60
-    deadline_warn_days: int = 2
-
-    # Заявки: за сколько часов до срока напоминать исполнителю и через сколько дней
-    # выполненная заявка закрывается сама, если заявитель не ответил
     request_warn_hours: int = 24
     request_autoclose_days: int = 3
-
-    # Корпуса ближе этого расстояния считаются одной площадкой
-    site_radius_m: int = 300
-    # Фрагмент базы знаний с меньшей близостью к вопросу помощнику не показывается
-    assistant_min_relevance: float = 0.12
-
-    # Начисления на ФОТ (страховые взносы), используются при оценке экономии
-    payroll_tax_rate: float = 0.302
-    # Отклонение меньше этого значения (в ставках) не считается проблемой
-    deviation_tolerance: float = 0.25
+    # Больше этого числа часов — работа уходит выездной бригаде, а не сотруднику на точке.
+    # Больше второго — крупная: руководитель получает предупреждение, её можно разбить на этапы
+    effort_brigade_hours: float = 4.0
+    effort_major_hours: float = 16.0
 
 
 @lru_cache

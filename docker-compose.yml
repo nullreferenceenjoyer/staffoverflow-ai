@@ -9,13 +9,11 @@ x-backend: &backend
   environment: &backend-env
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hr}:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}@db:5432/${POSTGRES_DB:-hr_edu}
     SECRET_KEY: ${SECRET_KEY:?задайте SECRET_KEY в .env}
-    PII_HASH_SALT: ${PII_HASH_SALT:?задайте PII_HASH_SALT в .env}
     ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.ru}
     ADMIN_PASSWORD: ${ADMIN_PASSWORD:?задайте ADMIN_PASSWORD в .env}
     SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
     SEED_DIR: /seed
     SEED_FILE: ${SEED_FILE:-}
-    STORAGE_DIR: /data/storage
     LLM_BASE_URL: ${LLM_BASE_URL:-}
     LLM_MODEL: ${LLM_MODEL:-local}
     LLM_API_KEY: ${LLM_API_KEY:-}
@@ -23,20 +21,9 @@ x-backend: &backend
     LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-900}
     LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
     LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
-    CLOUD_LLM_ENABLED: ${CLOUD_LLM_ENABLED:-false}
-    CLOUD_LLM_BASE_URL: ${CLOUD_LLM_BASE_URL:-}
-    CLOUD_LLM_MODEL: ${CLOUD_LLM_MODEL:-}
-    CLOUD_LLM_API_KEY: ${CLOUD_LLM_API_KEY:-}
-    EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hashing}
-    EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-    EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
-    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-    MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:-}
-    SITE_RADIUS_M: ${SITE_RADIUS_M:-300}
     REQUEST_WARN_HOURS: ${REQUEST_WARN_HOURS:-24}
     REQUEST_AUTOCLOSE_DAYS: ${REQUEST_AUTOCLOSE_DAYS:-3}
   volumes:
-    - storage:/data/storage
     - ./seed:/seed:ro
   extra_hosts:
     # чтобы из контейнера была видна модель, запущенная на хосте (LM Studio, Ollama)
@@ -123,4 +110,3 @@ services:
 
 volumes:
   pgdata:
-  storage:

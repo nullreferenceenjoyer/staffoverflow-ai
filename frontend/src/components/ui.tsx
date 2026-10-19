@@ -1,7 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
-import { Municipality } from '../api'
-import { fmtDelta, useApi } from '../lib'
 import { Icon, IconName } from './icons'
 
 export function Page({
@@ -132,12 +131,6 @@ export function Badge({ tone = 'gray', children }: { tone?: string; children: Re
   return <span className={`badge badge-${tone}`}>{children}</span>
 }
 
-/** Отклонение в ставках: избыток подсвечивается жёлтым, нехватка — красным. */
-export function Delta({ value }: { value: number }) {
-  if (Math.abs(value) < 0.005) return <span className="muted">0</span>
-  return <span className={value > 0 ? 'delta-plus' : 'delta-minus'}>{fmtDelta(value)}</span>
-}
-
 /** Обёртка для состояний загрузки: показывает спиннер, ошибку или содержимое. */
 export function Async<T>({
   state,
@@ -209,7 +202,8 @@ export function Modal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  return (
+  // В корень документа: внутри анимированной карточки fixed отсчитывался бы от неё
+  return createPortal(
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-label={title}>
         <div className="card-head">
@@ -220,7 +214,8 @@ export function Modal({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -242,7 +237,7 @@ export function Drawer({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  return (
+  return createPortal(
     <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <aside className="drawer" role="dialog">
         <div className="drawer-head">
@@ -254,7 +249,8 @@ export function Drawer({
         <div className="drawer-body">{children}</div>
         {footer && <div className="drawer-foot">{footer}</div>}
       </aside>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -303,67 +299,5 @@ export function Field({ label, children }: { label: string; children: ReactNode 
       <span>{label}</span>
       {children}
     </label>
-  )
-}
-
-export function MunicipalitySelect({
-  value,
-  onChange,
-  allLabel = 'Все муниципалитеты',
-}: {
-  value: number | null
-  onChange: (id: number | null) => void
-  allLabel?: string | null
-}) {
-  const { data } = useApi<Municipality[]>('/municipalities')
-  // Директору и специалисту доступен один муниципалитет — выбирать не из чего
-  if (!data || data.length < 2) return null
-  return (
-    <select
-      value={value ?? ''}
-      onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}
-      aria-label="Муниципалитет"
-    >
-      {allLabel && <option value="">{allLabel}</option>}
-      {data.map((m) => (
-        <option key={m.id} value={m.id}>
-          {m.name}
-        </option>
-      ))}
-    </select>
-  )
-}
-
-/** Кнопка для действий с запросом к серверу: блокируется на время выполнения. */
-export function ActionButton({
-  onClick,
-  children,
-  className = '',
-  confirm,
-}: {
-  onClick: () => Promise<unknown>
-  children: ReactNode
-  className?: string
-  confirm?: string
-}) {
-  const [busy, setBusy] = useState(false)
-  return (
-    <button
-      className={className}
-      disabled={busy}
-      onClick={async () => {
-        if (confirm && !window.confirm(confirm)) return
-        setBusy(true)
-        try {
-          await onClick()
-        } catch (e) {
-          window.alert(e instanceof Error ? e.message : 'Не удалось выполнить действие')
-        } finally {
-          setBusy(false)
-        }
-      }}
-    >
-      {busy ? 'Подождите…' : children}
-    </button>
   )
 }

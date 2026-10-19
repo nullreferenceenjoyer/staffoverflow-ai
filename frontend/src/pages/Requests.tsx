@@ -1,4 +1,4 @@
-import { CSSProperties, Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { CSSProperties, DragEvent, Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Area,
@@ -52,6 +52,42 @@ const EVENT_ICON: Record<string, IconName> = {
   status: 'check',
   assignee: 'user',
   deadline: 'clock',
+  effort: 'wrench',
+}
+
+const EFFORT_BY: Record<string, string> = {
+  llm: 'оценка модели',
+  rules: 'оценка по тексту заявки',
+  manual: 'оценка исправлена вручную',
+}
+
+/** Пометка трудоёмкости: простую работу не выделяем, сложную и крупную — да. */
+function Effort({ request }: { request: OrgRequest }) {
+  if (request.complexity === 'simple' || request.effort_hours === null) return null
+  return (
+    <Badge tone={request.complexity === 'major' ? 'red' : 'amber'}>
+      {request.complexity_title} · ~{request.effort_hours.toLocaleString('ru-RU')} ч
+    </Badge>
+  )
+}
+
+/** Кто делает: человек, бригада или пока никто. */
+function Worker({ request }: { request: OrgRequest }) {
+  if (request.assignee) {
+    return (
+      <span>
+        <Avatar name={request.assignee.name} small /> {request.assignee.name}
+      </span>
+    )
+  }
+  if (request.brigade) {
+    return (
+      <span title="Возьмёт любой участник бригады">
+        <Icon name="truck" size={13} /> {request.brigade.name}
+      </span>
+    )
+  }
+  return <span className="late">нет исполнителя</span>
 }
 
 /** Подпись срока: сколько осталось или на сколько опоздали. */
@@ -74,11 +110,29 @@ function Due({ request }: { request: OrgRequest }) {
   )
 }
 
-function RequestCard({ request, onOpen }: { request: OrgRequest; onOpen: () => void }) {
+function RequestCard({
+  request,
+  onOpen,
+  drag,
+  state,
+}: {
+  request: OrgRequest
+  onOpen: () => void
+  drag?: { onStart: () => void; onEnd: () => void }
+  state?: 'dragging' | 'saving'
+}) {
   return (
     <div
-      className={`task clickable kind-${request.kind} ${request.overdue ? 'overdue' : ''}`}
+      className={`task clickable kind-${request.kind} ${request.overdue ? 'overdue' : ''} ${state ?? ''}`}
       onClick={onOpen}
+      draggable={Boolean(drag)}
+      onDragStart={(e) => {
+        // Без setData Firefox не начинает перетаскивание
+        e.dataTransfer.setData('text/plain', String(request.id))
+        e.dataTransfer.effectAllowed = 'move'
+        drag?.onStart()
+      }}
+      onDragEnd={drag?.onEnd}
     >
       <div className="task-title">{request.title}</div>
       <div className="task-meta">
@@ -87,15 +141,15 @@ function RequestCard({ request, onOpen }: { request: OrgRequest; onOpen: () => v
         {request.kind !== 'planned' && (
           <Badge tone={REQUEST_KIND[request.kind].tone}>{REQUEST_KIND[request.kind].label}</Badge>
         )}
+        <Effort request={request} />
+        {request.stages > 0 && (
+          <span title="Разбита на этапы">
+            <Icon name="split" size={13} /> {request.stages}
+          </span>
+        )}
       </div>
       <div className="task-meta">
-        {request.assignee ? (
-          <span>
-            <Avatar name={request.assignee.name} small /> {request.assignee.name}
-          </span>
-        ) : (
-          <span className="late">нет исполнителя</span>
-        )}
+        <Worker request={request} />
         <Due request={request} />
         {request.comments > 0 && (
           <span>
@@ -279,7 +333,9 @@ function situation(request: OrgRequest) {
     case 'new':
       return 'Исполнитель пока не найден. Руководитель назначит его вручную.'
     case 'assigned':
-      return `Исполнитель — ${who}. Заявку ещё не взяли в работу.`
+      return who
+        ? `Исполнитель — ${who}. Заявку ещё не взяли в работу.`
+        : `Направлена бригаде «${request.brigade?.name}». Её возьмёт первый освободившийся участник.`
     case 'in_progress':
       return `Заявку выполняет ${who}.`
     case 'on_hold':
@@ -323,19 +379,332 @@ function describe(status: RequestStatus, request: OrgRequest): Action {
   }
 }
 
+/** Переход заявки. Вопрос исполнителя уходит в переписку, и статус меняется сам. */
+function perform(request: OrgRequest, action: Action, text: string, userId: number) {
+  if (action.status === 'on_hold' && request.assignee?.id === userId) {
+    return api(`/requests/${request.id}/comments`, { body: { text, needs_reply: true } })
+  }
+  return api(`/requests/${request.id}/status`, {
+    body: { status: action.status, comment: text || null },
+  })
+}
+
+/** Переход, которому нужно объяснение или подтверждение: спрашиваем перед отправкой. */
+function MoveDialog({
+  request,
+  action,
+  onClose,
+  onConfirm,
+}: {
+  request: OrgRequest
+  action: Action
+  onClose: () => void
+  onConfirm: (text: string) => Promise<void>
+}) {
+  const [text, setText] = useState('')
+  // Отчёт о выполнении не обязателен, но заявителю полезно знать, что сделано
+  const report = action.status === 'done'
+  return (
+    <Modal title={action.label} onClose={onClose}>
+      <Form
+        submitLabel={action.label}
+        onSubmit={async () => {
+          if (action.needsText && !text.trim()) throw new Error(action.needsText)
+          await onConfirm(text.trim())
+        }}
+      >
+        <p>
+          <span className="muted">№ {request.id}</span> {request.title}
+        </p>
+        {action.needsText || report ? (
+          <Field label={action.needsText ?? 'Что сделано — заявитель увидит это в отчёте'}>
+            <textarea
+              rows={3}
+              autoFocus
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={report ? 'Можно оставить пустым' : undefined}
+            />
+          </Field>
+        ) : (
+          <p className="muted">{action.confirm}</p>
+        )}
+      </Form>
+    </Modal>
+  )
+}
+
+// Закрыть и отклонить можно не только кнопкой в карточке, но и броском на доске
+const BOARD_EXTRA: RequestStatus[] = ['closed', 'rejected']
+
+/** Доска этапов. Заявку можно перетащить туда, куда её вправе перевести текущий пользователь. */
+function Board({
+  requests,
+  columns,
+  onOpen,
+  onChanged,
+}: {
+  requests: OrgRequest[]
+  columns: RequestStatus[]
+  onOpen: (id: number) => void
+  onChanged: () => Promise<void>
+}) {
+  const user = useUser()
+  const [dragged, setDragged] = useState<OrgRequest | null>(null)
+  const [over, setOver] = useState<RequestStatus | null>(null)
+  const [asking, setAsking] = useState<{ request: OrgRequest; action: Action } | null>(null)
+  // Пока сервер не ответил, карточка уже стоит в новом этапе
+  const [moving, setMoving] = useState<Record<number, RequestStatus>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  const targets = (request: OrgRequest) => request.actions.filter((s) => s !== request.status)
+  const accepts = (status: RequestStatus) => dragged !== null && targets(dragged).includes(status)
+  const movable = requests.some((r) => targets(r).length > 0)
+  // На сенсорном экране HTML5-перетаскивание не работает — этап меняют в карточке
+  const touch = window.matchMedia('(pointer: coarse)').matches
+
+  async function drop(status: RequestStatus) {
+    const request = dragged
+    setDragged(null)
+    setOver(null)
+    if (!request || !targets(request).includes(status)) return
+    const action = describe(status, request)
+    if (action.needsText || action.confirm || status === 'done') {
+      setAsking({ request, action })
+      return
+    }
+    setError(null)
+    setMoving((m) => ({ ...m, [request.id]: status }))
+    try {
+      await perform(request, action, '', user.id)
+      await onChanged()
+    } catch (e) {
+      setError(`Заявка № ${request.id}: ${e instanceof Error ? e.message : 'не удалось перенести'}`)
+    } finally {
+      setMoving(({ [request.id]: _, ...rest }) => rest)
+    }
+  }
+
+  // Обработчики цели: колонка этапа или отдельная зона «закрыть/отклонить»
+  const target = (status: RequestStatus) => ({
+    onDragEnter: () => accepts(status) && setOver(status),
+    onDragOver: (e: DragEvent) => {
+      if (!accepts(status)) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+    },
+    onDragLeave: (e: DragEvent) => {
+      // Переход на вложенную карточку — не уход из колонки
+      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+        setOver((current) => (current === status ? null : current))
+      }
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault()
+      void drop(status)
+    },
+  })
+
+  const dropClass = (status: RequestStatus) => {
+    if (dragged === null || dragged.status === status) return ''
+    if (over === status) return 'drop-over'
+    return accepts(status) ? 'drop-ok' : 'drop-no'
+  }
+  const extra = dragged ? BOARD_EXTRA.filter((s) => targets(dragged).includes(s)) : []
+
+  return (
+    <>
+      {movable && (
+        <p className="board-hint">
+          {touch
+            ? 'Чтобы перенести заявку в другой этап, откройте её и выберите действие внизу.'
+            : 'Перетащите заявку в другой этап. Пока вы её держите, этапы, куда её можно перенести, обведены.'}
+        </p>
+      )}
+      {error && <div className="notice notice-error">{error}</div>}
+      <div className="board wide">
+        {columns.map((column) => {
+          const items = requests.filter((r) => (moving[r.id] ?? r.status) === column)
+          if (touch && items.length === 0 && columns.length > 1) return null
+          return (
+            <div key={column} className={`board-column ${dropClass(column)}`} {...target(column)}>
+              <h3>
+                {REQUEST_STATUS[column].label} <span>{items.length}</span>
+              </h3>
+              {items.slice(0, 40).map((request) => (
+                <RequestCard
+                  key={request.id}
+                  request={request}
+                  onOpen={() => onOpen(request.id)}
+                  state={
+                    moving[request.id]
+                      ? 'saving'
+                      : dragged?.id === request.id
+                        ? 'dragging'
+                        : undefined
+                  }
+                  drag={
+                    targets(request).length && !moving[request.id]
+                      ? {
+                          onStart: () => {
+                            setError(null)
+                            setDragged(request)
+                          },
+                          onEnd: () => {
+                            setDragged(null)
+                            setOver(null)
+                          },
+                        }
+                      : undefined
+                  }
+                />
+              ))}
+              {items.length > 40 && (
+                <p className="muted">и ещё {items.length - 40} — удобнее смотреть в дереве</p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      {dragged && extra.length > 0 && (
+        <div className="board-drops">
+          {extra.map((status) => {
+            const action = describe(status, dragged)
+            return (
+              <div
+                key={status}
+                className={`board-drop ${action.tone === 'danger' ? 'danger' : ''} ${over === status ? 'drop-over' : ''}`}
+                {...target(status)}
+              >
+                {action.label}
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {asking && (
+        <MoveDialog
+          request={asking.request}
+          action={asking.action}
+          onClose={() => setAsking(null)}
+          onConfirm={async (text) => {
+            await perform(asking.request, asking.action, text, user.id)
+            setAsking(null)
+            await onChanged()
+          }}
+        />
+      )}
+    </>
+  )
+}
+
+/** Крупную работу делят на этапы: у каждого свой исполнитель и срок. */
+function SplitDialog({
+  request,
+  onClose,
+  onDone,
+}: {
+  request: OrgRequest
+  onClose: () => void
+  onDone: () => void
+}) {
+  const [stages, setStages] = useState([
+    { title: '', hours: '' },
+    { title: '', hours: '' },
+  ])
+  const total = stages.reduce((sum, s) => sum + (Number(s.hours.replace(',', '.')) || 0), 0)
+
+  function update(i: number, patch: Partial<(typeof stages)[number]>) {
+    setStages(stages.map((s, j) => (j === i ? { ...s, ...patch } : s)))
+  }
+
+  return (
+    <Modal title="Разбить на этапы" onClose={onClose} wide>
+      <Form
+        submitLabel={`Создать этапы (${stages.filter((s) => s.title.trim()).length})`}
+        onSubmit={async () => {
+          const body = stages
+            .filter((s) => s.title.trim())
+            .map((s) => ({
+              title: s.title.trim(),
+              hours: s.hours.trim() ? Number(s.hours.replace(',', '.')) : null,
+            }))
+          if (body.length < 2) throw new Error('Нужно хотя бы два этапа')
+          await api(`/requests/${request.id}/split`, { body: { stages: body } })
+          onDone()
+          onClose()
+        }}
+      >
+        <p>
+          <span className="muted">№ {request.id}</span> {request.title}
+          {request.effort_hours !== null && (
+            <span className="muted"> · оценка около {request.effort_hours} ч</span>
+          )}
+        </p>
+        <p className="muted">
+          Каждый этап станет отдельной заявкой: исполнитель и срок подберутся по его объёму. Общая
+          заявка будет выполнена, когда закроют все этапы.
+        </p>
+        {stages.map((stage, i) => (
+          <div key={i} className="row building-row">
+            <input
+              value={stage.title}
+              placeholder={`Этап ${i + 1}: что сделать`}
+              aria-label={`Этап ${i + 1}`}
+              onChange={(e) => update(i, { title: e.target.value })}
+            />
+            <input
+              className="hours"
+              inputMode="decimal"
+              value={stage.hours}
+              placeholder="часов"
+              aria-label={`Часов на этап ${i + 1}`}
+              onChange={(e) => update(i, { hours: e.target.value })}
+            />
+            <button
+              type="button"
+              className="ghost icon"
+              aria-label="Убрать этап"
+              disabled={stages.length <= 2}
+              onClick={() => setStages(stages.filter((_, j) => j !== i))}
+            >
+              <Icon name="x" />
+            </button>
+          </div>
+        ))}
+        <div className="actions">
+          <button
+            type="button"
+            className="ghost small"
+            disabled={stages.length >= 12}
+            onClick={() => setStages([...stages, { title: '', hours: '' }])}
+          >
+            <Icon name="plus" size={14} /> Ещё этап
+          </button>
+          {total > 0 && <span className="muted">Всего: {total} ч</span>}
+        </div>
+      </Form>
+    </Modal>
+  )
+}
+
 function RequestDrawer({
   id,
   onClose,
   onChanged,
+  onOpen,
 }: {
   id: number
   onClose: () => void
   onChanged: () => void
+  onOpen: (id: number) => void
 }) {
   const state = useApi<OrgRequest>(`/requests/${id}`)
   const user = useUser()
   const [text, setText] = useState('')
   const [due, setDue] = useState<string | null>(null)
+  const [hours, setHours] = useState<string | null>(null)
+  const [splitting, setSplitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const input = useRef<HTMLTextAreaElement>(null)
@@ -393,14 +762,7 @@ function RequestDrawer({
       return
     }
     if (action.confirm && !window.confirm(action.confirm)) return
-    // Вопрос от исполнителя уходит в переписку, а статус меняется сам
-    if (action.status === 'on_hold' && isAssignee && request?.status !== 'on_hold') {
-      void run(() => api(`/requests/${id}/comments`, { body: { text, needs_reply: true } }))
-      return
-    }
-    void run(() =>
-      api(`/requests/${id}/status`, { body: { status: action.status, comment: text || null } }),
-    )
+    if (request) void run(() => perform(request, action, text, user.id))
   }
 
   return (
@@ -440,7 +802,7 @@ function RequestDrawer({
                 }
               />
             )}
-            {error && <div className="chat-error">{error}</div>}
+            {error && <div className="inline-error">{error}</div>}
             <div className="actions wrap" style={{ marginTop: 8 }}>
               {actions.map((action) => (
                 <button
@@ -478,6 +840,31 @@ function RequestDrawer({
       ) : (
         situation(request) && <p className="muted">{situation(request)}</p>
       )}
+      {request.parent && (
+        <p className="muted">
+          <Icon name="split" size={13} /> Этап заявки{' '}
+          <button className="link" onClick={() => onOpen(request.parent!.id)}>
+            № {request.parent.id} «{request.parent.title}»
+          </button>
+        </p>
+      )}
+      {request.complexity === 'major' &&
+        !request.parent &&
+        !request.children?.length &&
+        request.can_manage &&
+        !closed && (
+          <div className="notice turn-notice">
+            <Icon name="alert" />
+            <span>
+              <strong>Крупная работа — около {request.effort_hours} ч.</strong> Её удобнее разбить
+              на этапы: каждый получит своего исполнителя и срок.
+              <br />
+              <button className="small" onClick={() => setSplitting(true)}>
+                <Icon name="split" size={14} /> Разбить на этапы
+              </button>
+            </span>
+          </div>
+        )}
 
       <p style={{ whiteSpace: 'pre-wrap' }}>{request.text}</p>
       {request.resolution && (
@@ -540,29 +927,125 @@ function RequestDrawer({
         <dd>
           {request.can_manage && !closed && request.assignable ? (
             <select
-              value={request.assignee?.id ?? ''}
-              disabled={busy}
-              onChange={(e) =>
-                run(() =>
-                  api(`/requests/${id}`, {
-                    method: 'PATCH',
-                    body: { assignee_id: e.target.value ? Number(e.target.value) : null },
-                  }),
-                )
+              value={
+                request.assignee
+                  ? `u${request.assignee.id}`
+                  : request.brigade
+                    ? `b${request.brigade.id}`
+                    : ''
               }
+              disabled={busy}
+              onChange={(e) => {
+                const value = e.target.value
+                // Значение «b12» — передать бригаде, «u5» — конкретному человеку
+                const body = value.startsWith('b')
+                  ? { brigade_id: Number(value.slice(1)) }
+                  : { assignee_id: value ? Number(value.slice(1)) : null }
+                void run(() => api(`/requests/${id}`, { method: 'PATCH', body }))
+              }}
             >
               <option value="">Не назначен</option>
-              {request.assignable.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} — {ROLE_LABELS[p.role]}
-                </option>
-              ))}
+              {request.brigades && request.brigades.length > 0 && (
+                <optgroup label="Бригады">
+                  {request.brigades.map((b) => (
+                    <option key={`b${b.id}`} value={`b${b.id}`}>
+                      {b.name}
+                      {b.serves ? ' — обслуживает учреждение' : ''}
+                      {b.members === 0 ? ' (нет участников)' : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <optgroup label="Сотрудники">
+                {request.assignable.map((p) => (
+                  <option key={`u${p.id}`} value={`u${p.id}`}>
+                    {p.name} — {ROLE_LABELS[p.role]}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           ) : (
-            (request.assignee?.name ?? 'Не назначен')
+            <Worker request={request} />
           )}
           <div className="muted">Отвечает: {ROLE_LABELS[request.routed_role]}</div>
         </dd>
+        {request.effort_hours !== null && (
+          <>
+            <dt>Трудоёмкость</dt>
+            <dd>
+              около {request.effort_hours.toLocaleString('ru-RU')} ч · {request.complexity_title}
+              {request.effort_by && (
+                <span className="muted"> · {EFFORT_BY[request.effort_by]}</span>
+              )}
+              {request.can_manage &&
+                !closed &&
+                (hours === null ? (
+                  <button
+                    className="ghost small"
+                    onClick={() => setHours(String(request.effort_hours))}
+                  >
+                    Исправить оценку
+                  </button>
+                ) : (
+                  <div className="actions" style={{ marginTop: 8 }}>
+                    <input
+                      className="hours"
+                      inputMode="decimal"
+                      aria-label="Часов работы"
+                      value={hours}
+                      onChange={(e) => setHours(e.target.value)}
+                    />
+                    <span className="muted">ч</span>
+                    <button
+                      className="primary small"
+                      disabled={busy || !Number(hours.replace(',', '.'))}
+                      onClick={() =>
+                        run(() =>
+                          api(`/requests/${id}`, {
+                            method: 'PATCH',
+                            body: { effort_hours: Number(hours.replace(',', '.')) },
+                          }),
+                        ).then(() => setHours(null))
+                      }
+                    >
+                      Сохранить
+                    </button>
+                    <button className="ghost small" onClick={() => setHours(null)}>
+                      Отмена
+                    </button>
+                  </div>
+                ))}
+              <div className="muted">
+                До 4 ч — сотрудник на точке, больше — выездная бригада. Срок пересчитается.
+              </div>
+            </dd>
+          </>
+        )}
+        {request.children && request.children.length > 0 && (
+          <>
+            <dt>Этапы</dt>
+            <dd>
+              <ol className="stage-list">
+                {request.children.map((c) => (
+                  <li key={c.id}>
+                    <button className="link" onClick={() => onOpen(c.id)}>
+                      {c.title}
+                    </button>
+                    <Badge tone={REQUEST_STATUS[c.status].tone}>
+                      {REQUEST_STATUS[c.status].label}
+                    </Badge>
+                    {c.assignee && <span className="muted">{c.assignee}</span>}
+                  </li>
+                ))}
+              </ol>
+              <div className="muted">
+                Выполнено{' '}
+                {request.children.filter((c) => ['done', 'closed'].includes(c.status)).length} из{' '}
+                {request.children.length}. Общая заявка закроется, когда выполнят все.
+              </div>
+            </dd>
+          </>
+        )}
         <dt>Тема</dt>
         <dd>
           {request.topic_title}
@@ -589,6 +1072,17 @@ function RequestDrawer({
           <span className="muted"> · {fmtDateTime(request.created_at)}</span>
         </dd>
       </dl>
+
+      {splitting && (
+        <SplitDialog
+          request={request}
+          onClose={() => setSplitting(false)}
+          onDone={() => {
+            void state.reload()
+            onChanged()
+          }}
+        />
+      )}
 
       <h3>Ход работы</h3>
       {request.events?.map((event) => (
@@ -745,10 +1239,15 @@ function StatsView({ onFilter }: { onFilter: (status: string) => void }) {
                   </thead>
                   <tbody>
                     {s.by_assignee.map((p) => (
-                      <tr key={p.id ?? 'none'}>
+                      <tr key={p.key}>
                         <td>
                           <span className="chips">
-                            <Avatar name={p.name} small /> {p.name}
+                            {p.id === null && p.key !== 'None' ? (
+                              <Icon name="truck" size={16} />
+                            ) : (
+                              <Avatar name={p.name} small />
+                            )}{' '}
+                            {p.name}
                           </span>
                         </td>
                         <td className="num">{p.active}</td>
@@ -851,10 +1350,10 @@ export function Requests() {
 
   const open = (id: number | null) => setParams(id ? { open: String(id) } : {}, { replace: true })
 
-  function changed() {
-    void state.reload()
+  async function changed() {
     // Счётчики в меню живут в другом компоненте — подскажем им обновиться
     window.dispatchEvent(new Event('requests-changed'))
+    await state.reload()
   }
 
   // Данные обновляются сами: статусы меняются и без участия пользователя
@@ -974,30 +1473,12 @@ export function Requests() {
                     : 'Заявок пока нет. Чтобы создать первую, нажмите «Новая заявка» справа вверху.'}
                 </Empty>
               ) : tab === 'board' ? (
-                <div className="board wide">
-                  {(status ? [status] : BOARD).map((column) => {
-                    const items = filtered.filter((r) => r.status === column)
-                    return (
-                      <div key={column} className="board-column">
-                        <h3>
-                          {REQUEST_STATUS[column].label} <span>{items.length}</span>
-                        </h3>
-                        {items.slice(0, 40).map((request) => (
-                          <RequestCard
-                            key={request.id}
-                            request={request}
-                            onOpen={() => open(request.id)}
-                          />
-                        ))}
-                        {items.length > 40 && (
-                          <p className="muted">
-                            и ещё {items.length - 40} — удобнее смотреть в дереве
-                          </p>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
+                <Board
+                  requests={filtered}
+                  columns={status ? [status] : BOARD}
+                  onOpen={open}
+                  onChanged={changed}
+                />
               ) : (
                 <RequestTree requests={filtered} grouping={grouping} onOpen={open} />
               )
@@ -1011,14 +1492,20 @@ export function Requests() {
           meta={meta.data}
           onClose={() => setCreating(false)}
           onCreated={(request) => {
-            changed()
+            void changed()
             if (tab === 'stats') setTab('tree')
             open(request.id)
           }}
         />
       )}
       {opened && (
-        <RequestDrawer key={opened} id={opened} onClose={() => open(null)} onChanged={changed} />
+        <RequestDrawer
+          key={opened}
+          id={opened}
+          onClose={() => open(null)}
+          onChanged={() => void changed()}
+          onOpen={open}
+        />
       )}
     </Page>
   )

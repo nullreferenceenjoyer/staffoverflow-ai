@@ -15,14 +15,8 @@ from app.security import decode_access_token
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-# Кто может менять данные учреждений и запускать расчёты
-EDITORS = (Role.admin, Role.regional_analyst, Role.municipal_specialist, Role.director)
-# Кто готовит проекты и ведёт задачи
-PLANNERS = (Role.admin, Role.regional_analyst, Role.municipal_specialist)
-# Кто утверждает проекты и правит нормативы
-APPROVERS = (Role.admin, Role.regional_analyst)
-# Кому доступны только заявки: штатные расписания и аналитика им не показываются
-SERVICE_ROLES = (Role.executor, Role.employee)
+# Роли, которые работают в пределах одного учреждения
+ORG_ROLES = (Role.director, Role.executor, Role.employee)
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
@@ -41,12 +35,6 @@ def require_roles(*roles: Role) -> Callable[..., User]:
         return user
 
     return checker
-
-
-def require_analytics_access(user: User = Depends(get_current_user)) -> User:
-    if user.role in SERVICE_ROLES:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Раздел недоступен для вашей роли")
-    return user
 
 
 class Scope:
@@ -72,38 +60,11 @@ class Scope:
             return query.where(Organization.municipality_id == self.user.municipality_id)
         return query.where(Organization.id == self.user.organization_id)
 
-    def org_ids(self, municipality_id: int | None = None) -> list[int] | None:
-        """None означает «без ограничений» — так запросы не тянут список из тысячи id."""
-        if self.is_regional and municipality_id is None:
-            return None
-        query = self.organizations().with_only_columns(Organization.id)
-        if municipality_id is not None:
-            query = query.where(Organization.municipality_id == municipality_id)
-        return list(self.db.scalars(query))
-
     def get_org(self, org_id: int) -> Organization:
         org = self.db.scalar(self.organizations().where(Organization.id == org_id))
         if org is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Учреждение не найдено")
         return org
-
-    def can_see_municipality(self, municipality_id: int | None) -> bool:
-        if self.is_regional:
-            return True
-        if self.user.role == Role.municipal_specialist:
-            return municipality_id == self.user.municipality_id
-        return False
-
-    def can_see_project(self, project) -> bool:
-        if self.is_regional:
-            return True
-        if self.user.role == Role.municipal_specialist:
-            return project.municipality_id == self.user.municipality_id
-        # Директор видит проект, если он затрагивает его учреждение
-        org_id = self.user.organization_id
-        return project.organization_id == org_id or any(
-            item.organization_id == org_id for item in project.items
-        )
 
 
 def get_scope(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Scope:

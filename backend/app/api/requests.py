@@ -1,12 +1,27 @@
 """Заявки сотрудников и учреждений: приём, назначение, переписка, сводка."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.deps import Scope, audit, get_scope
-from app.models import Building, IncomingRequest, Organization, RequestKind, Role, User
-from app.schemas import RequestComment, RequestIn, RequestStatusChange, RequestUpdate
-from app.services import helpdesk, routing
+from app.models import (
+    Brigade,
+    Building,
+    IncomingRequest,
+    Organization,
+    RequestKind,
+    Role,
+    User,
+)
+from app.schemas import (
+    RequestComment,
+    RequestIn,
+    RequestSplit,
+    RequestStatusChange,
+    RequestUpdate,
+)
+from app.services import effort, helpdesk, routing
 
 router = APIRouter(tags=["requests"])
 
@@ -16,7 +31,9 @@ def _query(scope: Scope):
         selectinload(IncomingRequest.organization).selectinload(Organization.municipality),
         selectinload(IncomingRequest.building),
         selectinload(IncomingRequest.author), selectinload(IncomingRequest.assignee),
-        selectinload(IncomingRequest.events),
+        selectinload(IncomingRequest.brigade).selectinload(Brigade.members),
+        selectinload(IncomingRequest.events), selectinload(IncomingRequest.parent),
+        selectinload(IncomingRequest.children).selectinload(IncomingRequest.assignee),
     )
 
 
@@ -51,6 +68,13 @@ def _out(item: IncomingRequest, user: User, detailed: bool = False) -> dict:
         "location": item.location,
         "author": _person(item.author),
         "assignee": _person(item.assignee),
+        "brigade": {"id": item.brigade.id, "name": item.brigade.name} if item.brigade else None,
+        "effort_hours": float(item.effort_hours) if item.effort_hours is not None else None,
+        "complexity": item.complexity,
+        "complexity_title": helpdesk.COMPLEXITY_TITLES[item.complexity],
+        "effort_by": item.effort_by,
+        "parent": {"id": item.parent.id, "title": item.parent.title} if item.parent else None,
+        "stages": len(item.children),
         "routed_role": item.routed_role,
         "classified_by": item.classified_by,
         "created_at": item.created_at,
@@ -67,6 +91,11 @@ def _out(item: IncomingRequest, user: User, detailed: bool = False) -> dict:
         "my_turn": helpdesk.my_turn(user, item),
     }
     if detailed:
+        result["children"] = [
+            {"id": c.id, "title": c.title, "status": c.status,
+             "assignee": c.assignee.full_name if c.assignee else None}
+            for c in item.children
+        ]
         result["events"] = [
             {"id": e.id, "kind": e.kind, "text": e.text, "created_at": e.created_at,
              "author": e.author.full_name if e.author else None}
@@ -83,12 +112,32 @@ def _get(request_id: int, scope: Scope) -> IncomingRequest:
 
 
 def _assignable(scope: Scope, item: IncomingRequest) -> dict[int, User]:
-    """Назначить можно любого, кто по роли вправе вести заявки этого учреждения."""
+    """Назначить можно любого, кто по роли вправе вести заявки этого учреждения,
+    и участников бригад, за которыми учреждение закреплено."""
     people = {}
     for role in (Role.executor, Role.director, Role.municipal_specialist, item.routed_role):
+        if role == Role.brigade:
+            continue
         for candidate in helpdesk.candidates(scope.db, item, role):
             people[candidate.id] = candidate
+    for brigade in _brigades(scope, item):
+        for member in brigade.members:
+            if member.is_active:
+                people[member.id] = member
     return people
+
+
+def _brigades(scope: Scope, item: IncomingRequest) -> list[Brigade]:
+    """Бригады, которым можно передать заявку: закреплённые за учреждением,
+    а также остальные бригады того же округа и региональные."""
+    municipality_id = item.organization.municipality_id
+    brigades = scope.db.scalars(
+        select(Brigade).where(Brigade.is_active).order_by(Brigade.name)
+        .options(selectinload(Brigade.members), selectinload(Brigade.organizations))
+    )
+    return [b for b in brigades
+            if b.municipality_id in (None, municipality_id)
+            or any(o.id == item.organization_id for o in b.organizations)]
 
 
 def _forbid_observer(user: User) -> None:
@@ -104,7 +153,8 @@ def meta(scope: Scope = Depends(get_scope)):
     ).all()
     return {
         "topics": [
-            {"code": code, "title": topic.title, "days": topic.days, "role": topic.role}
+            {"code": code, "title": topic.title, "days": topic.days, "role": topic.role,
+             "field": effort.is_field(code)}
             for code, topic in routing.TOPICS.items()
         ],
         "kinds": [
@@ -170,6 +220,12 @@ def get_request(request_id: int, scope: Scope = Depends(get_scope)):
     if result["can_manage"]:
         people = [_person(u) for u in _assignable(scope, item).values()]
         result["assignable"] = sorted(people, key=lambda p: p["name"])
+        result["brigades"] = [
+            {"id": b.id, "name": b.name,
+             "serves": any(o.id == item.organization_id for o in b.organizations),
+             "members": sum(m.is_active for m in b.members)}
+            for b in _brigades(scope, item)
+        ]
     return result
 
 
@@ -189,13 +245,35 @@ def update_request(request_id: int, body: RequestUpdate, request: Request,
             item.topic = topic
             item.kind = changes.get("kind") or item.kind
             item.classified_by = "manual"
+            if item.effort_by != "manual" and "effort_hours" not in changes:
+                # Другая тема — другая типовая работа
+                estimate = effort.estimate(item.topic, f"{item.title}. {item.text}")
+                item.effort_hours = estimate.hours
+                item.complexity = estimate.complexity
+                item.effort_by = estimate.by
+        if changes.get("effort_hours") is not None and effort.is_field(item.topic):
+            hours = round(changes["effort_hours"] * 2) / 2
+            item.effort_hours = hours
+            item.complexity = effort.complexity_of(hours)
+            item.effort_by = "manual"
+            helpdesk.log(item, user, "effort",
+                         f"Оценка трудоёмкости исправлена: около {hours:g} ч, "
+                         f"{helpdesk.COMPLEXITY_TITLES[item.complexity]}")
+        if {"topic", "kind", "effort_hours"} & set(changes):
             # Срок пересчитываем от создания, если его не задают явно этим же запросом
             if "due_at" not in changes:
+                hours = float(item.effort_hours) if item.effort_hours is not None else None
                 helpdesk.set_deadline(
-                    item, user, helpdesk.deadline(item.kind, item.topic, item.created_at))
+                    item, user, helpdesk.deadline(item.kind, item.topic, item.created_at, hours))
         if changes.get("due_at") is not None:
             helpdesk.set_deadline(item, user, changes["due_at"])
-        if "assignee_id" in changes:
+        if changes.get("brigade_id") is not None:
+            brigade = next((b for b in _brigades(scope, item) if b.id == changes["brigade_id"]),
+                           None)
+            if brigade is None:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Бригада не найдена")
+            helpdesk.assign(scope.db, item, user, None, brigade=brigade)
+        elif "assignee_id" in changes:
             assignee = None
             if changes["assignee_id"] is not None:
                 assignee = _assignable(scope, item).get(changes["assignee_id"])
@@ -209,6 +287,25 @@ def update_request(request_id: int, body: RequestUpdate, request: Request,
           details=body.model_dump(exclude_unset=True, mode="json"), request=request)
     scope.db.commit()
     return _out(item, user, detailed=True)
+
+
+@router.post("/requests/{request_id}/split", status_code=status.HTTP_201_CREATED)
+def split_request(request_id: int, body: RequestSplit, request: Request,
+                  scope: Scope = Depends(get_scope)):
+    """Разбить крупную работу на этапы: у каждого свой исполнитель и срок."""
+    user = scope.user
+    _forbid_observer(user)
+    item = _get(request_id, scope)
+    try:
+        children = helpdesk.split(scope.db, item, user,
+                                  [(s.title.strip(), s.hours) for s in body.stages])
+    except helpdesk.Forbidden as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    audit(scope.db, user, "request_split", entity="request", entity_id=item.id,
+          details={"stages": [c.id for c in children]}, request=request)
+    scope.db.commit()
+    scope.db.refresh(item)
+    return _out(_get(request_id, scope), user, detailed=True)
 
 
 @router.post("/requests/{request_id}/status")

@@ -1,61 +1,26 @@
-"""Чат с помощником, уведомления, пользователи и журнал действий."""
+"""Уведомления, пользователи, справочники учреждений и журнал действий."""
 
-import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db import SessionLocal, get_db
-from app.deps import (
-    SERVICE_ROLES,
-    Scope,
-    audit,
-    get_current_user,
-    get_scope,
-    require_analytics_access,
-    require_roles,
+from app.db import get_db
+from app.deps import ORG_ROLES, audit, get_current_user, require_roles
+from app.models import AuditLog, Brigade, Municipality, Notification, Organization, Role, User
+from app.schemas import (
+    MunicipalityOut,
+    NotificationOut,
+    OrganizationOut,
+    UserCreate,
+    UserOut,
+    UserUpdate,
 )
-from app.models import AuditLog, Notification, Role, User
-from app.schemas import ChatRequest, NotificationOut, UserCreate, UserOut, UserUpdate
 from app.security import hash_password
-from app.services import assistant, llm
 
 router = APIRouter()
-
-
-# --- помощник ------------------------------------------------------------------------
-
-
-@router.get("/assistant/status", tags=["assistant"])
-def assistant_status(_: User = Depends(get_current_user)):
-    return llm.probe()
-
-
-@router.post("/assistant/chat", tags=["assistant"],
-             dependencies=[Depends(require_analytics_access)])
-def chat(body: ChatRequest, request: Request, scope: Scope = Depends(get_scope)):
-    """Ответ помощника потоком Server-Sent Events."""
-    audit(scope.db, scope.user, "assistant_question", details={"question": body.question[:500]},
-          request=request)
-    scope.db.commit()
-    history = [m.model_dump() for m in body.history]
-    user_id = scope.user.id
-
-    def events():
-        # Сессия из зависимости закрывается раньше, чем заканчивается стрим,
-        # поэтому на время генерации открываем отдельную
-        with SessionLocal() as db:
-            stream_scope = Scope(db.get(User, user_id), db)
-            for event in assistant.run(stream_scope, body.question, history):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        yield 'data: {"type": "done"}\n\n'
-
-    return StreamingResponse(events(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # --- уведомления ---------------------------------------------------------------------
@@ -86,13 +51,39 @@ def mark_notifications_read(db: Session = Depends(get_db),
 # --- пользователи и аудит ------------------------------------------------------------
 
 
-def _check_binding(role: Role, municipality_id: int | None, organization_id: int | None) -> None:
+def _check_binding(role: Role, municipality_id: int | None, organization_id: int | None,
+                   brigade_id: int | None = None) -> None:
+    if role == Role.brigade and brigade_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Участнику выездной бригады нужно указать бригаду")
     if role == Role.municipal_specialist and municipality_id is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Специалисту нужно указать муниципалитет")
-    if role in (Role.director, *SERVICE_ROLES) and organization_id is None:
+    if role in ORG_ROLES and organization_id is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Для этой роли нужно указать учреждение")
+
+
+@router.get("/municipalities", response_model=list[MunicipalityOut], tags=["admin"])
+def list_municipalities(db: Session = Depends(get_db),
+                        _: User = Depends(require_roles(Role.admin))):
+    return db.scalars(select(Municipality).order_by(Municipality.name)).all()
+
+
+@router.get("/organizations", response_model=list[OrganizationOut], tags=["admin"])
+def list_organizations(db: Session = Depends(get_db),
+                       _: User = Depends(require_roles(Role.admin))):
+    return db.scalars(select(Organization).order_by(Organization.name)).all()
+
+
+def _check_references(db: Session, municipality_id: int | None,
+                      organization_id: int | None, brigade_id: int | None = None) -> None:
+    if brigade_id is not None and db.get(Brigade, brigade_id) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Бригада не найдена")
+    if municipality_id is not None and db.get(Municipality, municipality_id) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Муниципалитет не найден")
+    if organization_id is not None and db.get(Organization, organization_id) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Учреждение не найдено")
 
 
 @router.get("/users", response_model=list[UserOut], tags=["admin"])
@@ -104,15 +95,18 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(require_roles(Ro
              tags=["admin"])
 def create_user(body: UserCreate, request: Request, db: Session = Depends(get_db),
                 admin: User = Depends(require_roles(Role.admin))):
-    _check_binding(body.role, body.municipality_id, body.organization_id)
-    user = User(**body.model_dump(exclude={"password"}),
-                password_hash=hash_password(body.password))
+    _check_binding(body.role, body.municipality_id, body.organization_id, body.brigade_id)
+    _check_references(db, body.municipality_id, body.organization_id, body.brigade_id)
+    data = body.model_dump(exclude={"password"})
+    if body.role != Role.brigade:
+        data["brigade_id"] = None
+    user = User(**data, password_hash=hash_password(body.password))
     db.add(user)
     try:
         db.flush()
     except IntegrityError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "Такой e-mail или Telegram ID уже используется") from exc
+                            "Такой e-mail уже используется") from exc
     audit(db, admin, "user_created", entity="user", entity_id=user.id,
           details={"email": user.email, "role": user.role}, request=request)
     db.commit()
@@ -134,15 +128,14 @@ def update_user(user_id: int, body: UserUpdate, request: Request, db: Session = 
         user.password_hash = hash_password(password)
     for key, value in changes.items():
         setattr(user, key, value)
-    _check_binding(Role(user.role), user.municipality_id, user.organization_id)
+    if user.role != Role.brigade:
+        user.brigade_id = None
+    _check_binding(Role(user.role), user.municipality_id, user.organization_id, user.brigade_id)
+    _check_references(db, user.municipality_id, user.organization_id, user.brigade_id)
     audit(db, admin, "user_updated", entity="user", entity_id=user.id,
           details={"fields": sorted(changes) + (["password"] if password else [])},
           request=request)
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            "Такой Telegram ID уже используется") from exc
+    db.commit()
     return user
 
 

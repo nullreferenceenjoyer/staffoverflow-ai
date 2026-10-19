@@ -10,12 +10,8 @@ export const SERIES = [
   'var(--series-3)',
   'var(--series-4)',
 ] as const
-export const MUTED = 'var(--series-muted)'
 
-// Встроенная анимация recharts выключена: появление графиков анимируется в styles.css,
-// теми же кривыми, что и остальные блоки страницы.
 export const AXIS = { tickLine: false, axisLine: false, tickMargin: 8 } as const
-export const BAR = { radius: [4, 4, 0, 0] as [number, number, number, number], maxBarSize: 34 }
 
 interface TipEntry {
   name?: string

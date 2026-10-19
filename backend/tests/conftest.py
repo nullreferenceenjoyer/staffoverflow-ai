@@ -1,7 +1,7 @@
 """Общие фикстуры.
 
 Юнит-тесты базы не требуют. Тесты API (test_api.py) запускаются только при заданной
-TEST_DATABASE_URL — им нужен PostgreSQL с расширением pgvector:
+TEST_DATABASE_URL — им нужен PostgreSQL:
 
     docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
     TEST_DATABASE_URL=postgresql+psycopg://hr:<пароль>@127.0.0.1:54320/hr_edu_test pytest
@@ -19,7 +19,6 @@ if TEST_DATABASE_URL:
     # Должно быть выставлено до первого импорта app.db: движок создаётся при импорте
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
     os.environ["LLM_BASE_URL"] = ""
-os.environ.setdefault("STORAGE_DIR", os.path.join(os.path.dirname(__file__), ".storage"))
 
 
 def _create_database(url: str) -> None:
@@ -44,14 +43,11 @@ def client():
     _create_database(TEST_DATABASE_URL)
 
     from fastapi.testclient import TestClient
-    from sqlalchemy import text
 
     from app import seed
     from app.db import Base, SessionLocal, engine
     from app.main import app
 
-    with engine.begin() as connection:
-        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
