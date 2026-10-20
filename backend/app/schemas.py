@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -146,3 +147,116 @@ class RequestComment(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     # Вопрос заявителю: заявка встаёт на паузу до его ответа
     needs_reply: bool = False
+
+
+# --- нормативная численность ---------------------------------------------------------
+
+Category = Literal["aup", "support"]
+Basis = Literal["occupied", "approved"]
+
+
+class StaffingLineIn(BaseModel):
+    group_id: int
+    approved_fte: float | None = Field(None, ge=0, le=500)
+    occupied_fte: float | None = Field(None, ge=0, le=500)
+    # Средний оклад за ставку, ₽ в месяц
+    salary_rub: float | None = Field(None, gt=0, le=10_000_000)
+
+
+class StaffingDataIn(BaseModel):
+    """Штатка, занятость и показатели учреждения за учебный год — одним сохранением."""
+
+    year: str = Field(pattern=r"^\d{4}/\d{4}$")
+    students_count: int | None = Field(None, ge=0, le=100_000)
+    classes_count: int | None = Field(None, ge=0, le=2_000)
+    groups_count: int | None = Field(None, ge=0, le=2_000)
+    total_area_m2: float | None = Field(None, ge=0, le=1_000_000)
+    lines: list[StaffingLineIn] = Field(default_factory=list, max_length=100)
+    status: Literal["draft", "approved"] = "draft"
+    comment: str | None = Field(None, max_length=500)
+
+
+class RecalculateIn(BaseModel):
+    year: str = Field(pattern=r"^\d{4}/\d{4}$")
+    organization_id: int | None = None
+
+
+class StaffingRequestIn(BaseModel):
+    organization_id: int
+    year: str = Field(pattern=r"^\d{4}/\d{4}$")
+    category: Category
+    basis: Basis = "occupied"
+    group_id: int | None = None
+    # Пусто — текст по шаблону; заполненные — то, что человек поправил в предпросмотре
+    title: str | None = Field(None, max_length=200)
+    text: str | None = Field(None, max_length=4000)
+
+
+class NormDocumentIn(BaseModel):
+    title: str = Field(min_length=3, max_length=500)
+    doc_type: str = Field(min_length=2, max_length=40)
+    number: str | None = Field(None, max_length=60)
+    issued_at: date | None = None
+    effective_from: date | None = None
+    effective_to: date | None = None
+    issuer: str | None = Field(None, max_length=300)
+    scope_level: Literal["region", "municipality", "organization"] = "region"
+    status: Literal["active", "superseded", "archived"] = "active"
+    source_ref: str | None = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def _dates(self):
+        if self.effective_from and self.effective_to and self.effective_from > self.effective_to:
+            raise ValueError("«Действует с» позже, чем «Действует до»")
+        return self
+
+
+class NormCoefficientIn(BaseModel):
+    group_id: int
+    document_id: int | None = None
+    institution_type: Literal["all", "school", "preschool", "complex"] = "all"
+    scope_level: Literal["region", "municipality", "organization"] = "region"
+    scope_id: int | None = None
+    metric: Literal["students_count", "classes_count", "groups_count", "total_area_m2", "none"]
+    unit_size: float | None = Field(None, gt=0, le=1_000_000)
+    fte_per_unit: float = Field(ge=0, le=500)
+    min_fte: float | None = Field(None, ge=0, le=500)
+    max_fte: float | None = Field(None, ge=0, le=500)
+    applies_from: float | None = Field(None, ge=0)
+    applies_to: float | None = Field(None, ge=0)
+    rounding_step: float | None = Field(None, gt=0, le=10)
+    rounding_mode: Literal["up", "down", "nearest"] = "up"
+    tolerance_abs: float | None = Field(None, ge=0, le=50)
+    tolerance_pct: float | None = Field(None, ge=0, le=100)
+    priority: int = Field(0, ge=-100, le=100)
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_mandatory: bool = True
+    comment: str | None = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def _consistent(self):
+        if self.metric == "none" and (self.unit_size or self.applies_from is not None
+                                      or self.applies_to is not None):
+            raise ValueError("Без показателя нельзя задать «на сколько единиц» и диапазон")
+        if (self.min_fte is not None and self.max_fte is not None
+                and self.min_fte > self.max_fte):
+            raise ValueError("Минимум ставок больше максимума")
+        if (self.applies_from is not None and self.applies_to is not None
+                and self.applies_from > self.applies_to):
+            raise ValueError("Диапазон показателя задан наоборот")
+        if self.effective_from and self.effective_to and self.effective_from > self.effective_to:
+            raise ValueError("«Действует с» позже, чем «Действует до»")
+        if self.scope_level == "region":
+            self.scope_id = None
+        elif self.scope_id is None:
+            raise ValueError("Для местного норматива укажите муниципалитет или учреждение")
+        return self
+
+
+class AssistantAskIn(BaseModel):
+    # Пусто — новый разговор: про учреждение organization_id или про всю территорию
+    chat_id: int | None = None
+    year: str | None = Field(None, pattern=r"^\d{4}/\d{4}$")
+    organization_id: int | None = None
+    question: str = Field(min_length=2, max_length=2000)

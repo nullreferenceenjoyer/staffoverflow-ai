@@ -1,5 +1,7 @@
 """Заявки сотрудников и учреждений: приём, назначение, переписка, сводка."""
 
+from datetime import UTC
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -21,7 +23,7 @@ from app.schemas import (
     RequestStatusChange,
     RequestUpdate,
 )
-from app.services import effort, helpdesk, routing
+from app.services import effort, helpdesk, routing, staffing
 
 router = APIRouter(tags=["requests"])
 
@@ -104,8 +106,13 @@ def _out(item: IncomingRequest, user: User, detailed: bool = False) -> dict:
     return result
 
 
-def _get(request_id: int, scope: Scope) -> IncomingRequest:
-    item = scope.db.scalar(_query(scope).where(IncomingRequest.id == request_id))
+def _get(request_id: int, scope: Scope, lock: bool = False) -> IncomingRequest:
+    query = _query(scope).where(IncomingRequest.id == request_id)
+    if lock:
+        # Двое одновременно меняют одну заявку: второй ждёт и видит уже новый статус,
+        # а не перезаписывает изменения первого
+        query = query.with_for_update(of=IncomingRequest)
+    item = scope.db.scalar(query)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Заявка не найдена")
     return item
@@ -172,8 +179,19 @@ def meta(scope: Scope = Depends(get_scope)):
 
 
 @router.get("/requests")
-def list_requests(scope: Scope = Depends(get_scope)):
-    query = _query(scope).order_by(IncomingRequest.created_at.desc()).limit(1000)
+def list_requests(ids: str | None = None, scope: Scope = Depends(get_scope)):
+    """Список заявок. С ids=1,2,3 — только эти (из тех, что пользователь вправе видеть):
+    так интерфейс перечитывает изменившиеся заявки, не загружая весь список."""
+    query = _query(scope).order_by(IncomingRequest.created_at.desc())
+    if ids is not None:
+        try:
+            wanted = {int(part) for part in ids.split(",") if part.strip()}
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "ids — номера заявок через запятую") from exc
+        query = query.where(IncomingRequest.id.in_(sorted(wanted)[:500]))
+    else:
+        query = query.limit(1000)
     return [_out(item, scope.user) for item in scope.db.scalars(query)]
 
 
@@ -209,6 +227,13 @@ def create_request(body: RequestIn, request: Request, scope: Scope = Depends(get
     audit(scope.db, user, "request_created", entity="request", entity_id=item.id,
           details={"topic": item.topic, "kind": item.kind, "assignee_id": item.assignee_id,
                    "by": item.classified_by}, request=request)
+    # Кадровая заявка: если по тексту понятно, о какой группе речь, связываем её
+    # с результатом нормативного анализа
+    linked = staffing.auto_link(scope.db, item)
+    if linked is not None:
+        scope.db.flush()
+        audit(scope.db, None, "request_staffing_linked", entity="request", entity_id=item.id,
+              details={"result_id": linked.analysis_result_id, "by": "system"}, request=request)
     scope.db.commit()
     return _out(item, user, detailed=True)
 
@@ -217,6 +242,9 @@ def create_request(body: RequestIn, request: Request, scope: Scope = Depends(get
 def get_request(request_id: int, scope: Scope = Depends(get_scope)):
     item = _get(request_id, scope)
     result = _out(item, scope.user, detailed=True)
+    # Блок нормативного анализа видят только те, кому открыт раздел
+    result["staffing"] = (staffing.request_context(scope.db, item.id)
+                          if staffing.can_view(scope.user) else [])
     if result["can_manage"]:
         people = [_person(u) for u in _assignable(scope, item).values()]
         result["assignable"] = sorted(people, key=lambda p: p["name"])
@@ -233,10 +261,21 @@ def get_request(request_id: int, scope: Scope = Depends(get_scope)):
 def update_request(request_id: int, body: RequestUpdate, request: Request,
                    scope: Scope = Depends(get_scope)):
     user = scope.user
-    item = _get(request_id, scope)
+    item = _get(request_id, scope, lock=True)
     if not helpdesk.can_manage(user, item):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Заявку ведёт другой сотрудник")
+    if item.status in helpdesk.FINAL:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Заявка закрыта, менять её нельзя")
     changes = body.model_dump(exclude_unset=True)
+    if changes.get("due_at") is not None:
+        due = changes["due_at"]
+        if due.tzinfo is None:
+            # Время без пояса считаем UTC, иначе его нельзя сравнить со сроками в базе
+            due = due.replace(tzinfo=UTC)
+        if due <= item.created_at:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Срок должен быть позже создания заявки")
+        changes["due_at"] = due
     try:
         if "topic" in changes or "kind" in changes:
             topic = changes.get("topic") or item.topic
@@ -295,7 +334,7 @@ def split_request(request_id: int, body: RequestSplit, request: Request,
     """Разбить крупную работу на этапы: у каждого свой исполнитель и срок."""
     user = scope.user
     _forbid_observer(user)
-    item = _get(request_id, scope)
+    item = _get(request_id, scope, lock=True)
     try:
         children = helpdesk.split(scope.db, item, user,
                                   [(s.title.strip(), s.hours) for s in body.stages])
@@ -313,7 +352,7 @@ def change_status(request_id: int, body: RequestStatusChange, request: Request,
                   scope: Scope = Depends(get_scope)):
     user = scope.user
     _forbid_observer(user)
-    item = _get(request_id, scope)
+    item = _get(request_id, scope, lock=True)
     try:
         helpdesk.change_status(scope.db, item, user, body.status, body.comment)
     except helpdesk.Forbidden as exc:
@@ -328,7 +367,7 @@ def change_status(request_id: int, body: RequestStatusChange, request: Request,
 def add_comment(request_id: int, body: RequestComment, scope: Scope = Depends(get_scope)):
     user = scope.user
     _forbid_observer(user)
-    item = _get(request_id, scope)
+    item = _get(request_id, scope, lock=True)
     try:
         helpdesk.add_comment(scope.db, item, user, body.text.strip(), body.needs_reply)
     except helpdesk.Forbidden as exc:

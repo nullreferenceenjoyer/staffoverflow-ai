@@ -185,6 +185,35 @@ export function Tabs<T extends string>({
   )
 }
 
+/** Переключатель из двух-трёх значений: «АУП | Вспомогательный». */
+export function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: [T, string][]
+  value: T
+  onChange: (value: T) => void
+  label: string
+}) {
+  return (
+    <div className="seg" role="group" aria-label={label}>
+      {options.map(([key, title]) => (
+        <button
+          key={key}
+          type="button"
+          aria-pressed={key === value}
+          className={key === value ? 'active' : ''}
+          onClick={() => onChange(key)}
+        >
+          {title}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function Modal({
   title,
   onClose,
@@ -225,11 +254,14 @@ export function Drawer({
   onClose,
   children,
   footer,
+  wide,
 }: {
   title: ReactNode
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
+  /** Для широких таблиц: штатка с окладами и ФОТ */
+  wide?: boolean
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -239,7 +271,7 @@ export function Drawer({
 
   return createPortal(
     <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <aside className="drawer" role="dialog">
+      <aside className={`drawer ${wide ? 'drawer-wide' : ''}`} role="dialog">
         <div className="drawer-head">
           <div>{title}</div>
           <button className="ghost icon" onClick={onClose} aria-label="Закрыть">

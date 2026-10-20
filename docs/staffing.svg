@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="770" viewBox="0 0 1040 770" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="13" fill="#1f2933">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7785"/>
+    </marker>
+    <style>
+      .box  { fill: #f5f7fa; stroke: #9aa5b1; stroke-width: 1.2; }
+      .key  { fill: #e8f0fe; stroke: #4a7bd0; stroke-width: 1.4; }
+      .bad  { fill: #fdebe2; stroke: #c2572b; stroke-width: 1.3; }
+      .more { fill: #fff7e6; stroke: #d4a017; stroke-width: 1.3; }
+      .ok   { fill: #e8f5e9; stroke: #4caf50; stroke-width: 1.3; }
+      .idle { fill: #eeeeee; stroke: #9e9e9e; stroke-width: 1.2; }
+      .note { fill: #ffffff; stroke: #9aa5b1; stroke-width: 1.2; stroke-dasharray: 5 4; }
+      .line { fill: none; stroke: #6b7785; stroke-width: 1.4; }
+      .sub  { font-size: 12px; fill: #52606d; }
+      .head { font-size: 16px; font-weight: 600; }
+      .b    { font-weight: 600; font-size: 14px; }
+    </style>
+  </defs>
+
+  <rect width="1040" height="770" fill="#ffffff"/>
+
+  <text x="30" y="34" class="head">1. Что вносят люди</text>
+  <text x="370" y="34" class="head">2. Что считает система</text>
+  <text x="710" y="34" class="head">3. Итог</text>
+
+  <!-- Нормативы -->
+  <rect x="30" y="60" width="280" height="100" rx="8" class="box"/>
+  <text x="46" y="84" class="b">Нормативы</text>
+  <text x="46" y="106">«1 ставка на 300 обучающихся»</text>
+  <text x="46" y="128" class="sub">вносит региональный аналитик,</text>
+  <text x="46" y="146" class="sub">местные — специалист управления</text>
+
+  <!-- Показатели -->
+  <rect x="30" y="180" width="280" height="100" rx="8" class="box"/>
+  <text x="46" y="204" class="b">Показатели учреждения</text>
+  <text x="46" y="226">840 обучающихся, 34 класса, 12 000 м²</text>
+  <text x="46" y="248" class="sub">вносит директор («Проверить данные»)</text>
+  <text x="46" y="266" class="sub">или специалист загрузкой из Excel</text>
+
+  <!-- Штатка -->
+  <rect x="30" y="300" width="280" height="100" rx="8" class="box"/>
+  <text x="46" y="324" class="b">Штатное расписание</text>
+  <text x="46" y="346">Делопроизводство: утверждено 2,</text>
+  <text x="46" y="364">занято 2 — только ставки, без ФИО</text>
+  <text x="46" y="386" class="sub">вносит директор или загрузка из Excel</text>
+
+  <!-- Норматив -->
+  <rect x="370" y="110" width="280" height="100" rx="8" class="key"/>
+  <text x="386" y="134" class="b">Норматив — сколько положено</text>
+  <text x="386" y="156">840 / 300 × 1 = 2,8</text>
+  <text x="386" y="176">округление вверх до 0,25 → 3 ставки</text>
+  <text x="386" y="196" class="sub">берётся самый точный норматив</text>
+
+  <!-- Факт -->
+  <rect x="370" y="300" width="280" height="100" rx="8" class="key"/>
+  <text x="386" y="324" class="b">Факт — сколько есть</text>
+  <text x="386" y="346">«по занятости»: занято 2</text>
+  <text x="386" y="366">«по штатке»: утверждено 2</text>
+  <text x="386" y="386" class="sub">переключатель «Основа» в анализе</text>
+
+  <!-- Отклонение -->
+  <rect x="710" y="200" width="300" height="100" rx="8" class="key"/>
+  <text x="726" y="224" class="b">Отклонение = факт − норматив</text>
+  <text x="726" y="248">2 − 3 = −1 ставка</text>
+  <text x="726" y="268" class="sub">минус — не хватает, плюс — больше нормы,</text>
+  <text x="726" y="286" class="sub">до 0,25 ставки или 5 % — допуск</text>
+
+  <!-- стрелки к расчёту -->
+  <path d="M310,110 C340,110 340,140 368,140" class="line" marker-end="url(#arrow)"/>
+  <path d="M310,230 C340,230 340,180 368,180" class="line" marker-end="url(#arrow)"/>
+  <path d="M310,350 H368" class="line" marker-end="url(#arrow)"/>
+  <path d="M650,160 C680,160 680,230 708,230" class="line" marker-end="url(#arrow)"/>
+  <path d="M650,350 C680,350 680,270 708,270" class="line" marker-end="url(#arrow)"/>
+
+  <!-- шина к статусам -->
+  <path d="M860,300 V425" class="line"/>
+  <path d="M145,425 H895" class="line"/>
+  <path d="M145,425 V448" class="line" marker-end="url(#arrow)"/>
+  <path d="M395,425 V448" class="line" marker-end="url(#arrow)"/>
+  <path d="M645,425 V448" class="line" marker-end="url(#arrow)"/>
+  <path d="M895,425 V448" class="line" marker-end="url(#arrow)"/>
+
+  <!-- Статусы -->
+  <rect x="30" y="450" width="230" height="70" rx="8" class="bad"/>
+  <text x="145" y="478" text-anchor="middle" class="b">Дефицит</text>
+  <text x="145" y="500" text-anchor="middle" class="sub">ставок меньше норматива</text>
+
+  <rect x="280" y="450" width="230" height="70" rx="8" class="more"/>
+  <text x="395" y="478" text-anchor="middle" class="b">Сверх норматива</text>
+  <text x="395" y="500" text-anchor="middle" class="sub">ставок больше норматива</text>
+
+  <rect x="530" y="450" width="230" height="70" rx="8" class="ok"/>
+  <text x="645" y="478" text-anchor="middle" class="b">Норма</text>
+  <text x="645" y="500" text-anchor="middle" class="sub">отклонение в пределах допуска</text>
+
+  <rect x="780" y="450" width="230" height="70" rx="8" class="idle"/>
+  <text x="895" y="478" text-anchor="middle" class="b">Нет данных</text>
+  <text x="895" y="500" text-anchor="middle" class="sub">не хватает показателя или штатки</text>
+
+  <path d="M145,520 V556" class="line" marker-end="url(#arrow)"/>
+  <path d="M395,520 V556" class="line" marker-end="url(#arrow)"/>
+  <path d="M645,520 V556" class="line" marker-end="url(#arrow)"/>
+  <path d="M895,520 V556" class="line" marker-end="url(#arrow)"/>
+
+  <!-- Заявки -->
+  <rect x="30" y="558" width="230" height="96" rx="8" class="box"/>
+  <text x="46" y="582" class="b">«Дополнительные ставки»</text>
+  <text x="46" y="604" class="sub">АУП → специалисту управления</text>
+  <text x="46" y="622" class="sub">вспомогательный → директору</text>
+  <text x="46" y="640" class="sub">(пишет сам директор — специалисту)</text>
+
+  <rect x="280" y="558" width="230" height="96" rx="8" class="box"/>
+  <text x="296" y="582" class="b">«Сокращение и реорг.»</text>
+  <text x="296" y="604" class="sub">небольшой излишек → специалисту</text>
+  <text x="296" y="622" class="sub">крупный → региональному аналитику</text>
+  <text x="296" y="640" class="sub">текст: «проверить», а не «уволить»</text>
+
+  <rect x="530" y="558" width="230" height="96" rx="8" class="note"/>
+  <text x="546" y="582" class="b">Заявка не нужна</text>
+  <text x="546" y="604" class="sub">«Требует проверки» — нет норматива</text>
+  <text x="546" y="622" class="sub">или группы гасят друг друга:</text>
+  <text x="546" y="640" class="sub">«Вопрос по нормативам» аналитику</text>
+
+  <rect x="780" y="558" width="230" height="96" rx="8" class="box"/>
+  <text x="796" y="582" class="b">«Исправление данных»</text>
+  <text x="796" y="604" class="sub">→ директору внести показатель</text>
+  <text x="796" y="622" class="sub">или утвердить штатку</text>
+  <text x="796" y="640" class="sub">(пишет сам директор — специалисту)</text>
+
+  <!-- Пересчёт -->
+  <rect x="30" y="680" width="980" height="70" rx="8" class="note"/>
+  <text x="46" y="706" class="b">Когда пересчитывается</text>
+  <text x="46" y="730">сохранили «Проверить данные» · загрузили Excel · изменили норматив или документ · нажали «Пересчитать» · раз в сутки сам</text>
+</svg>

@@ -104,6 +104,10 @@ def _hours(value) -> float | None:
 
 def classify(text: str) -> Classification:
     """Тема, адресат и, если модель её дала, оценка часов работы."""
+    if not llm.should_try():
+        # Модель выключена или только что не ответила: не держим заявителя до таймаута
+        topic = classify_by_rules(text)
+        return Classification(topic, TOPICS[topic].role, "rules")
     topics = "\n".join(f"- {code}: {topic.title}" for code, topic in TOPICS.items())
     try:
         reply = llm.complete(

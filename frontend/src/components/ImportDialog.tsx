@@ -32,12 +32,19 @@ export function ImportDialog({
   onDone,
   children,
   extra,
+  title,
+  uploadUrl,
+  templateUrl,
 }: {
-  kind: 'organizations' | 'users'
+  kind: string
   onClose: () => void
   onDone: () => void
   children?: ReactNode
   extra?: Record<string, string>
+  /** Для загрузок вне администрирования: свои заголовок и адреса */
+  title?: string
+  uploadUrl?: string
+  templateUrl?: string
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
@@ -52,7 +59,7 @@ export function ImportDialog({
     form.append('file', file)
     for (const [key, value] of Object.entries(extra ?? {})) form.append(key, value)
     try {
-      setResult(await api<ImportResult>(`/admin/import/${kind}`, { form }))
+      setResult(await api<ImportResult>(uploadUrl ?? `/admin/import/${kind}`, { form }))
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось загрузить файл')
@@ -62,7 +69,7 @@ export function ImportDialog({
   }
 
   return (
-    <Modal title={TITLES[kind]} onClose={onClose} wide>
+    <Modal title={title ?? TITLES[kind as keyof typeof TITLES]} onClose={onClose} wide>
       {result ? (
         <div className="import-result">
           <div className="kpis">
@@ -150,7 +157,9 @@ export function ImportDialog({
               <span>Скачайте шаблон и заполните его. На втором листе — что писать в колонках.</span>
               <button
                 type="button"
-                onClick={() => download(`/admin/templates/${kind}.xlsx`, `шаблон-${kind}.xlsx`)}
+                onClick={() =>
+                  download(templateUrl ?? `/admin/templates/${kind}.xlsx`, `шаблон-${kind}.xlsx`)
+                }
               >
                 <Icon name="download" size={16} /> Шаблон Excel
               </button>

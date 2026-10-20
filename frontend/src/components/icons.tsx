@@ -32,6 +32,10 @@ const PATHS = {
   split: 'M4 6h5l5 6h6M14 12l-5 6H4M17 9l3 3-3 3',
   wrench: 'M14.5 5.5a4 4 0 0 0-5.2 5.2L4 16l4 4 5.3-5.3a4 4 0 0 0 5.2-5.2l-2.7 2.7-2.3-2.3z',
   pause: 'M9 5v14M15 5v14',
+  refresh: 'M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4',
+  scale: 'M12 4v16M8 20h8M5 7h14M5 7l-3 6a3 3 0 0 0 6 0zM19 7l-3 6a3 3 0 0 0 6 0zM12 4h.01',
+  doc: 'M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6',
+  edit: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4',
 } as const
 
 export type IconName = keyof typeof PATHS

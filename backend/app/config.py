@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     # Qwen3 и похожие модели по умолчанию «думают» вслух; на CPU это дорого
     llm_disable_thinking: bool = True
+    # Как часто проверять, что модель отвечает. Пока она недоступна, заявки не ждут её
+    # ответа, а сразу разбираются по ключевым словам
+    llm_check_interval_s: int = 60
+
+    # Часовой пояс для сроков в текстах уведомлений и ленты заявки
+    timezone: str = "Europe/Moscow"
 
     # Заявки: как часто проверять сроки, за сколько часов до срока напоминать
     # исполнителю и через сколько дней выполненная заявка закрывается сама,
@@ -40,6 +46,15 @@ class Settings(BaseSettings):
     # Больше второго — крупная: руководитель получает предупреждение, её можно разбить на этапы
     effort_brigade_hours: float = 4.0
     effort_major_hours: float = 16.0
+
+    # Нормативная численность: допуск, если он не задан в нормативе, и пороги важности
+    # отклонения (в ставках или процентах от норматива)
+    staffing_tolerance_fte: float = 0.25
+    staffing_tolerance_pct: float = 5.0
+    staffing_high_fte: float = 1.0
+    staffing_high_pct: float = 20.0
+    staffing_medium_fte: float = 0.5
+    staffing_medium_pct: float = 10.0
 
 
 @lru_cache

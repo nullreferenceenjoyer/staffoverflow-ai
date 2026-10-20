@@ -256,6 +256,308 @@ class RequestEvent(Base):
     author: Mapped[User | None] = relationship()
 
 
+# --- нормативная численность ----------------------------------------------------------
+# Только агрегаты: ставки по группам должностей, показатели учреждения и нормативы.
+# Сотрудников, ФИО и окладов здесь нет.
+
+
+class StaffCategory(enum.StrEnum):
+    aup = "aup"  # административно-управленческий персонал
+    support = "support"  # учебно-вспомогательный и обслуживающий персонал
+
+
+class ScheduleStatus(enum.StrEnum):
+    draft = "draft"
+    approved = "approved"
+    archived = "archived"
+
+
+class AnalysisStatus(enum.StrEnum):
+    deficit = "deficit"  # не хватает ставок
+    surplus = "surplus"  # сверх норматива
+    normal = "normal"  # в пределах допуска
+    no_data = "no_data"  # не хватает данных для расчёта
+    warning = "warning"  # норматив не настроен или отклонения по группам гасят друг друга
+
+
+class PersonnelGroup(Base):
+    """Группа нормирования: «Делопроизводство», «Уборка помещений» и т. п."""
+
+    __tablename__ = "personnel_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(60), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+    top_category: Mapped[str] = mapped_column(_str_enum(StaffCategory, 16))
+    subcategory: Mapped[str | None] = mapped_column(String(40))
+    # Типы учреждений, для которых группа имеет смысл. Пусто — для всех
+    institution_types: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    # Примеры должностей — подсказка, что относить к группе
+    positions: Mapped[str | None] = mapped_column(String(500))
+    is_active: Mapped[bool] = mapped_column(default=True)
+    sort_order: Mapped[int] = mapped_column(default=0)
+
+
+class NormativeDocument(Base):
+    """Документ-основание норматива. Хранятся только реквизиты, без файла."""
+
+    __tablename__ = "normative_documents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(500))
+    doc_type: Mapped[str] = mapped_column(String(40))  # закон, приказ, постановление, локальный акт
+    number: Mapped[str | None] = mapped_column(String(60))
+    issued_at: Mapped[date | None] = mapped_column(Date)
+    effective_from: Mapped[date | None] = mapped_column(Date)
+    effective_to: Mapped[date | None] = mapped_column(Date)
+    issuer: Mapped[str | None] = mapped_column(String(300))
+    scope_level: Mapped[str] = mapped_column(String(16), default="region")
+    # active | superseded | archived
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    source_ref: Mapped[str | None] = mapped_column(String(500))
+
+
+class NormativeCoefficient(Base):
+    """Норматив: сколько ставок группы положено на единицу показателя учреждения.
+
+    Ставки = показатель / unit_size * fte_per_unit, затем округление, минимум и максимум.
+    Без unit_size — фиксированные fte_per_unit ставок. applies_from/applies_to ограничивают
+    норматив значениями показателя: «1,25 ставки при числе учащихся от 801».
+    """
+
+    __tablename__ = "normative_coefficients"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int | None] = mapped_column(
+        ForeignKey("normative_documents.id", ondelete="RESTRICT"), index=True
+    )
+    personnel_group_id: Mapped[int] = mapped_column(
+        ForeignKey("personnel_groups.id", ondelete="CASCADE"), index=True
+    )
+    institution_type: Mapped[str] = mapped_column(String(16), default="all")
+    # region — весь регион, municipality / organization — местный норматив для scope_id
+    scope_level: Mapped[str] = mapped_column(String(16), default="region")
+    scope_id: Mapped[int | None]
+    metric: Mapped[str] = mapped_column(String(32))
+    unit_size: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    fte_per_unit: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    min_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    max_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    applies_from: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    applies_to: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    rounding_step: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    rounding_mode: Mapped[str] = mapped_column(String(8), default="up")  # up | down | nearest
+    tolerance_abs: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    tolerance_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    priority: Mapped[int] = mapped_column(default=0)
+    effective_from: Mapped[date | None] = mapped_column(Date)
+    effective_to: Mapped[date | None] = mapped_column(Date)
+    is_mandatory: Mapped[bool] = mapped_column(default=True)
+    comment: Mapped[str | None] = mapped_column(String(500))
+
+    document: Mapped[NormativeDocument | None] = relationship()
+    group: Mapped[PersonnelGroup] = relationship()
+
+
+class StaffingSchedule(Base):
+    """Штатное расписание учреждения на учебный год — только итоги по группам."""
+
+    __tablename__ = "staffing_schedules"
+    __table_args__ = (Index("ux_staffing_schedule", "organization_id", "academic_year",
+                            unique=True),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    academic_year: Mapped[str] = mapped_column(String(9))  # 2026/2027
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(_str_enum(ScheduleStatus, 16), default=ScheduleStatus.draft)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    document_id: Mapped[int | None] = mapped_column(
+        ForeignKey("normative_documents.id", ondelete="SET NULL")
+    )
+    comment: Mapped[str | None] = mapped_column(String(500))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    lines: Mapped[list[StaffingLine]] = relationship(
+        cascade="all, delete-orphan", order_by="StaffingLine.id"
+    )
+
+
+class StaffingLine(Base):
+    """Строка штатки: утверждённые и занятые ставки группы, без привязки к людям."""
+
+    __tablename__ = "staffing_lines"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(
+        ForeignKey("staffing_schedules.id", ondelete="CASCADE"), index=True
+    )
+    personnel_group_id: Mapped[int] = mapped_column(
+        ForeignKey("personnel_groups.id", ondelete="RESTRICT")
+    )
+    building_id: Mapped[int | None] = mapped_column(
+        ForeignKey("buildings.id", ondelete="SET NULL")
+    )
+    approved_fte: Mapped[Decimal] = mapped_column(Numeric(7, 2), default=0)
+    # Пусто — занятость не ведётся, анализ «по занятости» для группы невозможен
+    occupied_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    # Средний оклад за одну ставку группы, ₽ в месяц. Итог по группе, не по людям
+    salary_rub: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    comment: Mapped[str | None] = mapped_column(String(500))
+
+
+class StaffingScheduleVersion(Base):
+    """Снимок штатки после каждого изменения: по нему видно, как менялись ставки и ФОТ."""
+
+    __tablename__ = "staffing_schedule_versions"
+    __table_args__ = (Index("ix_schedule_versions_org_year", "organization_id", "academic_year"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(
+        ForeignKey("staffing_schedules.id", ondelete="CASCADE"), index=True
+    )
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    academic_year: Mapped[str] = mapped_column(String(9))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(String(16))  # manual | import | demo
+    status: Mapped[str] = mapped_column(String(16))
+    comment: Mapped[str | None] = mapped_column(String(500))
+    # [{group_id, approved, occupied, salary}]
+    lines: Mapped[list[dict]] = mapped_column(JSONB, default=list)
+    approved_fte: Mapped[Decimal] = mapped_column(Numeric(8, 2))
+    occupied_fte: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    payroll_approved: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    payroll_occupied: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+
+    author: Mapped[User | None] = relationship()
+
+
+class InstitutionMetrics(Base):
+    """Показатели учреждения, от которых считаются нормативы."""
+
+    __tablename__ = "institution_metrics"
+    __table_args__ = (Index("ux_institution_metrics", "organization_id", "academic_year",
+                            unique=True),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    academic_year: Mapped[str] = mapped_column(String(9))
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    students_count: Mapped[int | None]
+    classes_count: Mapped[int | None]
+    groups_count: Mapped[int | None]
+    total_area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 1))
+    source: Mapped[str] = mapped_column(String(16), default="manual")  # manual | import | external
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StaffingAnalysisResult(Base):
+    """Результат расчёта на дату. Строка без группы — итог по категории.
+
+    Хранится вместе со снимком нормативов и показателей: заявка, связанная с расчётом,
+    показывает ту картину, что была при её создании, даже если норматив потом поменяли.
+    """
+
+    __tablename__ = "staffing_analysis_results"
+    __table_args__ = (Index("ix_staffing_results_current", "academic_year", "is_current",
+                            "basis", "top_category"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    personnel_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("personnel_groups.id", ondelete="SET NULL")
+    )
+    top_category: Mapped[str] = mapped_column(String(16))
+    academic_year: Mapped[str] = mapped_column(String(9))
+    period_date: Mapped[date] = mapped_column(Date)
+    basis: Mapped[str] = mapped_column(String(16))  # approved | occupied
+    required_fte: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    approved_fte: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    occupied_fte: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    fact_fte: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    deviation_fte: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    deviation_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 1))
+    status: Mapped[str] = mapped_column(_str_enum(AnalysisStatus, 16))
+    severity: Mapped[str | None] = mapped_column(String(8))  # low | medium | high
+    missing_reasons: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    coefficients_snapshot: Mapped[list[dict]] = mapped_column(JSONB, default=list)
+    metrics_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Последний расчёт. Прежние строки остаются, только если на них ссылаются заявки
+    is_current: Mapped[bool] = mapped_column(default=True)
+
+    group: Mapped[PersonnelGroup | None] = relationship()
+
+
+class RequestStaffingLink(Base):
+    """Связь заявки с результатом нормативного анализа."""
+
+    __tablename__ = "request_staffing_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("incoming_requests.id", ondelete="CASCADE"), index=True
+    )
+    analysis_result_id: Mapped[int] = mapped_column(
+        ForeignKey("staffing_analysis_results.id", ondelete="CASCADE"), index=True
+    )
+    link_type: Mapped[str] = mapped_column(String(16))  # deficit | surplus | no_data | question
+    created_by: Mapped[str] = mapped_column(String(8))  # system | user
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    result: Mapped[StaffingAnalysisResult] = relationship()
+
+
+class AssistantChat(Base):
+    """Разговор с помощником по штатке. Виден только своему автору."""
+
+    __tablename__ = "assistant_chats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    academic_year: Mapped[str] = mapped_column(String(9))
+    # Разговор про одно учреждение. Пусто — про всю территорию пользователя
+    organization_id: Mapped[int | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    organization: Mapped[Organization | None] = relationship()
+    messages: Mapped[list[AssistantMessage]] = relationship(
+        cascade="all, delete-orphan", order_by="AssistantMessage.id"
+    )
+
+
+class AssistantMessage(Base):
+    __tablename__ = "assistant_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(
+        ForeignKey("assistant_chats.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 

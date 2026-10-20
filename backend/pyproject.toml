@@ -17,6 +17,7 @@ dependencies = [
     "httpx>=0.27",
     "python-multipart>=0.0.9",  # форма входа и загрузка файлов
     "openpyxl>=3.1",  # импорт из Excel и шаблоны
+    "tzdata>=2024.1",  # часовые пояса для текстов уведомлений: в slim-образе их нет
 ]
 
 [project.optional-dependencies]

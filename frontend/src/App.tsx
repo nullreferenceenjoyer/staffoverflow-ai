@@ -1,13 +1,15 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
-import { api, getToken, Notification, RequestStats, setToken, User } from './api'
+import { api, getToken, LlmStatus, Notification, RequestStats, setToken, User } from './api'
 import { Icon, IconName } from './components/icons'
 import { Avatar } from './components/ui'
-import { fmtDateTime, ROLE_LABELS, useApi } from './lib'
+import { debounce, fmtDateTime, ROLE_LABELS, useApi } from './lib'
+import { startLive, stopLive, useLive, useLiveConnected, useLlmStatus } from './live'
 import { Admin } from './pages/Admin'
 import { Login } from './pages/Login'
 import { Requests } from './pages/Requests'
+import { Staffing } from './pages/Staffing'
 
 const UserContext = createContext<User | null>(null)
 
@@ -25,8 +27,19 @@ interface NavItem {
   roles?: User['role'][]
 }
 
+// Нормативную численность видят те, кто принимает кадровые решения: сотруднику,
+// хозслужбе и бригадам раздел ни к чему
+const STAFFING_ROLES: User['role'][] = [
+  'admin',
+  'regional_analyst',
+  'municipal_specialist',
+  'director',
+  'observer',
+]
+
 const NAV: NavItem[] = [
   { to: '/requests', label: 'Заявки', icon: 'inbox' },
+  { to: '/staffing', label: 'Нормативная численность', icon: 'scale', roles: STAFFING_ROLES },
   { to: '/admin', label: 'Администрирование', icon: 'shield', roles: ['admin'] },
 ]
 
@@ -51,26 +64,41 @@ function Notifications() {
   const [open, setOpen] = useState(false)
   const box = useRef<HTMLDivElement>(null)
   const unread = state.data?.filter((n) => !n.read_at).length ?? 0
+  const reload = state.reload
+  const openRef = useRef(open)
+  openRef.current = open
+
+  // Новое уведомление появляется под колокольчиком сразу, без перезагрузки страницы
+  useLive((event) => {
+    if (event.type !== 'notifications') return
+    void (async () => {
+      await reload({ silent: true })
+      // Панель открыта — пользователь их уже видит
+      if (openRef.current) await api('/notifications/read', { method: 'POST' }).catch(() => {})
+    })()
+  })
 
   useEffect(() => {
     if (!open) return
     const close = (e: MouseEvent) => {
       if (!box.current?.contains(e.target as Node)) {
         setOpen(false)
-        void state.reload()
+        void reload({ silent: true })
       }
     }
     window.addEventListener('mousedown', close)
     return () => window.removeEventListener('mousedown', close)
-  }, [open, state])
+  }, [open, reload])
 
   async function toggle() {
     setOpen(!open)
-    if (!open && unread) {
-      await api('/notifications/read', { method: 'POST' })
-      // Список не перезагружаем сразу, чтобы непрочитанные остались выделены, пока панель открыта
-    } else if (open) {
-      void state.reload()
+    if (!open) {
+      // Сначала свежий список, потом отметка о прочтении: непрочитанные остаются
+      // выделены, пока панель открыта
+      await reload({ silent: true })
+      await api('/notifications/read', { method: 'POST' }).catch(() => {})
+    } else {
+      void reload({ silent: true })
     }
   }
 
@@ -107,24 +135,106 @@ function Notifications() {
   )
 }
 
+/** Значок связи: зелёный — изменения приходят сразу, серый — переподключаемся. */
+function LiveDot() {
+  const connected = useLiveConnected()
+  const [grace, setGrace] = useState(true)
+  // Первые секунды соединение ещё устанавливается — не пугаем серым значком
+  useEffect(() => {
+    const timer = setTimeout(() => setGrace(false), 5000)
+    return () => clearTimeout(timer)
+  }, [])
+  const off = !connected && !grace
+  return (
+    <span
+      className={`live-dot ${connected ? 'on' : off ? 'off' : ''}`}
+      role="status"
+      title={
+        connected
+          ? 'Изменения заявок появляются сразу'
+          : 'Нет связи с сервером, переподключаемся. Данные могут быть устаревшими.'
+      }
+    >
+      <i />
+      {off && <span>нет связи</span>}
+    </span>
+  )
+}
+
+function llmMessage(state: LlmStatus) {
+  if (!state.configured) {
+    return 'Языковая модель не подключена: тема новых заявок определяется по ключевым словам. Чтобы включить модель, задайте LLM_BASE_URL в .env (см. README).'
+  }
+  const since = state.since ? ` с ${fmtDateTime(state.since)}` : ''
+  return `Языковая модель не отвечает${since}: тема новых заявок определяется по ключевым словам.${state.error ? ` Причина: ${state.error}` : ''}`
+}
+
+/** Администратор сразу видит, что модель выключена или не работает. */
+function LlmBanner() {
+  const state = useLlmStatus()
+  const [checking, setChecking] = useState(false)
+  const [hidden, setHidden] = useState(false)
+  const data = state.data
+  if (!data || data.available !== false || hidden) return null
+
+  async function check() {
+    setChecking(true)
+    try {
+      state.setData(await api<LlmStatus>('/llm/check', { method: 'POST' }))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <div className={`notice llm-banner ${data.configured ? 'notice-error' : ''}`} role="alert">
+      <Icon name="alert" />
+      <span>{llmMessage(data)}</span>
+      <span className="actions">
+        {data.configured && (
+          <button className="small" disabled={checking} onClick={check}>
+            {checking ? 'Проверяем…' : 'Проверить сейчас'}
+          </button>
+        )}
+        <button className="ghost icon" aria-label="Скрыть" onClick={() => setHidden(true)}>
+          <Icon name="x" size={16} />
+        </button>
+      </span>
+    </div>
+  )
+}
+
 function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [theme, toggleTheme] = useTheme()
   const location = useLocation()
   // На узком экране меню выезжает поверх страницы и закрывается после перехода
   const [menuOpen, setMenuOpen] = useState(false)
   useEffect(() => setMenuOpen(false), [location.pathname])
+  // Поток событий живёт, пока пользователь в системе
+  useEffect(() => {
+    startLive()
+    return stopLive
+  }, [])
   // Счётчики заявок в меню — чтобы о них не нужно было вспоминать
   const requests = useApi<RequestStats>('/requests/stats')
   const reloadRequests = requests.reload
+  const refreshCounts = useMemo(
+    () => debounce(() => void reloadRequests({ silent: true }), 1000),
+    [reloadRequests],
+  )
+  useLive((event) => {
+    if (event.type === 'requests') refreshCounts()
+  })
   useEffect(() => {
-    const reload = () => void reloadRequests()
-    const timer = setInterval(reload, 60_000)
-    window.addEventListener('requests-changed', reload)
+    // Просрочка наступает со временем, без событий, поэтому изредка перечитываем и так
+    const timer = setInterval(refreshCounts, 120_000)
+    window.addEventListener('requests-changed', refreshCounts)
     return () => {
       clearInterval(timer)
-      window.removeEventListener('requests-changed', reload)
+      refreshCounts.cancel()
+      window.removeEventListener('requests-changed', refreshCounts)
     }
-  }, [reloadRequests])
+  }, [refreshCounts])
   const items = NAV.filter((item) => !item.roles || item.roles.includes(user.role))
   const waiting = (requests.data?.my_turn ?? 0) + (requests.data?.overdue ?? 0)
 
@@ -196,6 +306,7 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
             {items.find((item) => location.pathname.startsWith(item.to))?.label ?? 'Заявки'}
           </span>
           <span className="spacer" />
+          <LiveDot />
           <button
             className="ghost icon"
             onClick={toggleTheme}
@@ -208,8 +319,12 @@ function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
         {/* key перезапускает анимацию появления при переходе между разделами */}
         <main key={location.pathname.split('/')[1]}>
+          {user.role === 'admin' && <LlmBanner />}
           <Routes>
             <Route path="/requests" element={<Requests />} />
+            {STAFFING_ROLES.includes(user.role) && (
+              <Route path="/staffing" element={<Staffing />} />
+            )}
             {user.role === 'admin' && <Route path="/admin" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/requests" replace />} />
           </Routes>

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -88,6 +89,15 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def when(moment: datetime) -> str:
+    """Дата и время для текста уведомления — в часовом поясе учреждений, а не в UTC."""
+    try:
+        zone = ZoneInfo(get_settings().timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = UTC
+    return f"{moment.astimezone(zone):%d.%m.%Y %H:%M}"
+
+
 def deadline(kind: str, topic: str, start: datetime, hours: float | None = None) -> datetime:
     if kind in KIND_HOURS:
         return start + timedelta(hours=KIND_HOURS[kind])
@@ -124,6 +134,27 @@ def visible(scope: Scope):
         # Бригада видит всё, что ей направлено, по всем закреплённым учреждениям
         mine.append(IncomingRequest.brigade_id == user.brigade_id)
     return query.where(or_(*mine))
+
+
+def concerns(viewer, info: dict) -> bool:
+    """Касается ли изменение заявки пользователя — для обновлений в реальном времени.
+
+    Те же правила, что в visible(), но по сведениям из события: учреждение, округ,
+    участники (заявитель, исполнитель — нынешний и прежний), бригады и адресаты.
+    Меняя visible(), поменяйте и эту функцию.
+    """
+    if viewer.role in (Role.admin, Role.regional_analyst, Role.observer):
+        return True
+    if viewer.role == Role.municipal_specialist:
+        return info["mun"] == viewer.municipality_id
+    if viewer.role == Role.director:
+        return info["org"] == viewer.organization_id
+    mine = viewer.id in info["people"]
+    if viewer.role == Role.executor:
+        return info["org"] == viewer.organization_id and (mine or Role.executor in info["roles"])
+    if viewer.role == Role.brigade and viewer.brigade_id is not None:
+        return mine or viewer.brigade_id in info["brigades"]
+    return mine
 
 
 def can_manage(user: User, request: IncomingRequest) -> bool:
@@ -164,8 +195,10 @@ def my_turn(user: User, request: IncomingRequest) -> str | None:
             return "Возьмите заявку в работу"
         if request.status == S.in_progress:
             return "Выполните и напишите отчёт"
-    if (request.status == S.new and request.assignee_id is None and request.brigade_id is None
-            and can_manage(user, request)):
+    # Открытая заявка, которую никто не делает (не нашёлся исполнитель, его сняли,
+    # бригаду расформировали), не должна теряться: ход за руководителем
+    if (request.status in (S.new, S.assigned, S.in_progress) and request.assignee_id is None
+            and request.brigade_id is None and can_manage(user, request)):
         return "Назначьте исполнителя"
     return None
 
@@ -279,15 +312,40 @@ def notify(db: Session, request: IncomingRequest, users: list[User | None], text
                             text=f"Заявка № {request.id} «{request.title}»: {text}"))
 
 
+def workers(request: IncomingRequest) -> list[User]:
+    """Кто сейчас делает заявку: исполнитель, а пока его нет — вся бригада."""
+    if request.assignee is not None:
+        return [request.assignee]
+    if request.brigade is not None:
+        return [m for m in request.brigade.members if m.is_active]
+    return []
+
+
+# Роли, на которые переходит заявка вместе с исполнителем
+WORKER_ROLES = (Role.executor, Role.director, Role.brigade, Role.municipal_specialist,
+                Role.regional_analyst, Role.admin)
+
+
+def _give(request: IncomingRequest, user: User) -> None:
+    """Отдаёт заявку человеку. Участник бригады ведёт её от имени бригады,
+    остальные — сами по себе, и бригада с заявки снимается."""
+    request.assignee = user
+    request.brigade = user.brigade if user.role == Role.brigade else None
+    if user.role in WORKER_ROLES:
+        request.routed_role = user.role
+
+
 def create(db: Session, author: User, organization: Organization, *, title: str, text: str,
            kind: str = RequestKind.planned, topic: str | None = None,
            building: Building | None = None, location: str | None = None,
            created_at: datetime | None = None, parent: IncomingRequest | None = None,
-           effort_hours: float | None = None) -> IncomingRequest:
+           effort_hours: float | None = None, role: Role | None = None) -> IncomingRequest:
+    """Создаёт и распределяет заявку. role — адресат вместо того, что задан темой
+    (заявки из нормативного анализа направляются по своим правилам)."""
     created_at = created_at or now()
     model_hours = None
     if topic in routing.TOPICS:
-        role, classified_by = routing.TOPICS[topic].role, "manual"
+        role, classified_by = role or routing.TOPICS[topic].role, "manual"
     else:
         found = routing.classify(f"{title}. {text}")
         topic, role, classified_by, model_hours = found.topic, found.role, found.by, found.hours
@@ -311,7 +369,7 @@ def create(db: Session, author: User, organization: Organization, *, title: str,
             f"{COMPLEXITY_TITLES[estimate.complexity]}{why}", created_at)
 
     assignee, brigade, why = route(db, request)
-    due = f"срок {request.due_at:%d.%m.%Y %H:%M}"
+    due = f"срок {when(request.due_at)}"
     if brigade is not None:
         request.brigade = brigade
         request.status = S.assigned
@@ -339,35 +397,54 @@ def create(db: Session, author: User, organization: Organization, *, title: str,
 
 def assign(db: Session, request: IncomingRequest, actor: User, assignee: User | None,
            brigade: Brigade | None = None) -> None:
+    """Назначает исполнителя или бригаду.
+
+    Новый исполнитель сам берёт заявку в работу, поэтому заявка «в работе» после
+    передачи снова становится «назначенной». Если исполнителя сняли и делать заявку
+    некому, она возвращается в «новые» — к руководителю, который назначит другого.
+    """
     if request.status in FINAL:
         raise Forbidden("Заявка уже закрыта")
+    if request.status == S.done:
+        raise Forbidden("Работа уже выполнена — её нужно принять или вернуть на доработку")
+    moment = now()
+    previous = request.assignee
     if brigade is not None:
+        if request.brigade_id == brigade.id and request.assignee_id is None:
+            return
         # Передать бригаде: возьмёт любой её участник
         request.brigade = brigade
         request.assignee = None
         request.routed_role = Role.brigade
         db.flush()
-        log(request, actor, "assignee", f"Передана бригаде «{brigade.name}»")
-        if request.status == S.new:
-            request.status = S.assigned
-        notify(db, request, list(brigade.members), "передана вашей бригаде", skip=actor)
+        log(request, actor, "assignee", f"Передана бригаде «{brigade.name}»", moment)
+        if request.status in (S.new, S.in_progress):
+            _set_status(request, S.assigned, moment)
+        notify(db, request, [m for m in brigade.members if m.is_active],
+               "передана вашей бригаде", skip=actor)
+        notify(db, request, [previous], f"передана бригаде «{brigade.name}»", skip=actor)
         return
-    request.assignee = assignee
-    db.flush()
     if assignee is None:
-        log(request, actor, "assignee", "Исполнитель снят")
-        if request.status == S.assigned and request.brigade_id is None:
-            request.status = S.new
+        if previous is None:
+            return
+        request.assignee = None
+        db.flush()
+        log(request, actor, "assignee", "Исполнитель снят", moment)
+        if request.status in (S.assigned, S.in_progress):
+            _set_status(request, S.assigned if request.brigade_id else S.new, moment)
+        notify(db, request, [previous], "вы больше не исполнитель", skip=actor)
         return
-    # Участник бригады ведёт заявку от её имени, остальные — сами по себе
-    request.brigade_id = assignee.brigade_id if assignee.role == Role.brigade else None
-    if assignee.role in (Role.executor, Role.director, Role.brigade,
-                         Role.municipal_specialist, Role.regional_analyst, Role.admin):
-        request.routed_role = assignee.role
-    log(request, actor, "assignee", f"Исполнитель: {assignee.full_name}")
-    if request.status == S.new:
-        request.status = S.assigned
-    notify(db, request, [assignee], "назначена вам", skip=actor)
+    if request.assignee_id == assignee.id:
+        return
+    _give(request, assignee)
+    db.flush()
+    log(request, actor, "assignee", f"Исполнитель: {assignee.full_name}", moment)
+    if request.status in (S.new, S.in_progress):
+        _set_status(request, S.assigned, moment)
+    notify(db, request, [assignee], f"назначена вам, срок {when(request.due_at)}"
+           if request.due_at else "назначена вам", skip=actor)
+    notify(db, request, [previous], f"передана другому исполнителю: {assignee.full_name}",
+           skip=actor)
 
 
 def _resume(request: IncomingRequest, moment: datetime) -> None:
@@ -413,39 +490,65 @@ def change_status(db: Session, request: IncomingRequest, actor: User, status: st
         raise Forbidden("Напишите причину — заявитель должен понимать, что происходит")
     if status == S.in_progress and request.status == S.done and not comment:
         raise Forbidden("Напишите, что именно не сделано")
+    unfinished = [c for c in request.children if c.status in ACTIVE]
+    if status in (S.done, S.closed) and unfinished:
+        raise Forbidden(f"Сначала нужно выполнить этапы: не готово {len(unfinished)} "
+                        f"из {len(request.children)}")
 
     returned = request.status == S.done and status == S.in_progress
-    if manager and request.assignee is None and status in (S.in_progress, S.done):
+    previous = request.status
+    if manager and request.assignee is None and status in (S.in_progress, S.on_hold, S.done):
         # Кто взялся, тот и исполнитель
-        request.assignee = actor
+        _give(request, actor)
         log(request, actor, "assignee", f"Исполнитель: {actor.full_name}", moment)
     _set_status(request, status, moment)
     if status == S.done:
         request.resolution = comment or request.resolution
+    elif returned:
+        # Прежний отчёт остаётся в ленте, но в карточке уже не выдаётся за итог
+        request.resolution = None
+    if status == S.rejected:
+        # Отклонили общую заявку — этапы делать больше незачем
+        for child in unfinished:
+            _set_status(child, S.rejected, moment)
+            log(child, actor, "status", "Отклонена вместе с общей заявкой", moment)
+            notify(db, child, workers(child), "отклонена вместе с общей заявкой", skip=actor)
     _sync_parent(db, request, moment)
     if returned:
         title = "Возвращена в работу"
     elif withdrawn:
         title = "Отозвана заявителем"
+    elif previous == S.on_hold and status == S.in_progress:
+        title = "Работа продолжена"
     else:
         title = STATUS_TITLES[status]
     log(request, actor, "status", f"{title}. {comment}" if comment else title, moment)
-    notify(db, request, [request.author, request.assignee],
+    notify(db, request, [request.author, *workers(request)],
            title.lower() + (f" — {comment[:200]}" if comment else ""), skip=actor)
 
 
 def _sync_parent(db: Session, request: IncomingRequest, moment: datetime) -> None:
-    """Крупная заявка считается выполненной, когда закрыты все её этапы."""
+    """Крупная заявка выполнена, когда выполнены все её этапы; если этап вернули
+    на доработку, общая заявка тоже возвращается в работу."""
     parent = request.parent
-    if parent is None or parent.status not in ACTIVE:
+    if parent is None:
         return
     stages = parent.children
     finished = (S.done, S.closed, S.rejected)
-    if all(c.status in finished for c in stages) and any(c.status != S.rejected for c in stages):
+    complete = (all(c.status in finished for c in stages)
+                and any(c.status != S.rejected for c in stages))
+    if complete and parent.status in ACTIVE:
         _set_status(parent, S.done, moment)
         parent.resolution = parent.resolution or "Все этапы выполнены"
         log(parent, None, "status", "Выполнена: закрыты все этапы", moment)
         notify(db, parent, [parent.author], "все этапы выполнены, проверьте и примите работу")
+    elif not complete and parent.status == S.done:
+        _set_status(parent, S.in_progress, moment)
+        parent.resolution = None
+        log(parent, None, "status", f"Возвращена в работу: этап «{request.title}» не выполнен",
+            moment)
+        notify(db, parent, [parent.author, *workers(parent)],
+               f"этап «{request.title}» вернули на доработку")
 
 
 def split(db: Session, request: IncomingRequest, actor: User,
@@ -493,14 +596,16 @@ def add_comment(db: Session, request: IncomingRequest, actor: User, text: str,
     elif request.author_id == actor.id and request.status == S.on_hold:
         _set_status(request, S.in_progress, moment)
         log(request, None, "status", "Заявитель ответил, работа продолжена", moment)
-    notify(db, request, [request.author, request.assignee],
+    notify(db, request, [request.author, *workers(request)],
            f"{actor.full_name}: {text[:200]}", skip=actor)
 
 
 def set_deadline(request: IncomingRequest, actor: User, due_at: datetime) -> None:
+    if request.due_at == due_at:
+        return
     request.due_at = due_at
     request.last_reminder_on = None
-    log(request, actor, "deadline", f"Срок изменён: до {due_at:%d.%m.%Y %H:%M}")
+    log(request, actor, "deadline", f"Срок изменён: до {when(due_at)}")
 
 
 def run_automation(db: Session, moment: datetime | None = None) -> dict[str, int]:
@@ -526,15 +631,16 @@ def run_automation(db: Session, moment: datetime | None = None) -> dict[str, int
             (IncomingRequest.last_reminder_on.is_(None))
             | (IncomingRequest.last_reminder_on < today))):
         if request.due_at < moment:
-            text = f"срок истёк {request.due_at:%d.%m.%Y %H:%M}"
+            text = f"срок истёк {when(request.due_at)}"
             # О просрочке узнаёт и руководитель учреждения
             recipients = [request.assignee, *candidates(db, request, Role.director)]
         else:
-            text = f"срок истекает {request.due_at:%d.%m.%Y %H:%M}"
+            text = f"срок истекает {when(request.due_at)}"
             recipients = [request.assignee]
         if request.assignee is None and request.brigade is not None:
-            recipients += list(request.brigade.members)
-        elif request.assignee is None:
+            recipients += [m for m in request.brigade.members if m.is_active]
+        elif request.assignee is None and request.routed_role != Role.brigade:
+            # Бригаду могли расформировать — тогда не рассылаем всем бригадам региона
             recipients += candidates(db, request, request.routed_role)
         notify(db, request, recipients, text)
         request.last_reminder_on = today
@@ -566,8 +672,9 @@ def stats(requests: list[IncomingRequest], moment: datetime | None = None, days:
         overdue += late
         active = r.status in ACTIVE
 
+        title = routing.TOPICS.get(r.topic, routing.TOPICS["other"]).title
         topic = topics.setdefault(r.topic, {
-            "topic": r.topic, "title": routing.TOPICS[r.topic].title, "total": 0, "active": 0,
+            "topic": r.topic, "title": title, "total": 0, "active": 0,
             "overdue": 0, "hours": []})
         topic["total"] += 1
         topic["active"] += active

@@ -20,6 +20,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import seed_staffing
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import (
@@ -27,6 +28,7 @@ from app.models import (
     Building,
     Complexity,
     Municipality,
+    NormativeDocument,
     Organization,
     RequestStatus,
     Role,
@@ -123,6 +125,7 @@ def ensure_reference_data(db: Session) -> None:
         db.add(User(email=settings.admin_email, full_name="Администратор",
                     password_hash=hash_password(settings.admin_password), role=Role.admin))
         log.info("Created admin user %s", settings.admin_email)
+    seed_staffing.ensure_groups(db)
     db.commit()
 
 
@@ -273,6 +276,7 @@ def seed_demo(db: Session, org_count: int, profile: dict | None = None) -> None:
         .order_by((Organization.id != first_org.id), Organization.id)
     ).all()
     seed_requests(db, rng, pilot_orgs, users, password_hash)
+    seed_staffing.seed_staffing_demo(db, first_org.id)
     db.commit()
     log.info("Demo data ready: %d organizations, demo password is %s", org_count, DEMO_PASSWORD)
 
@@ -365,8 +369,26 @@ def main() -> None:
             return
         if db.scalar(select(func.count()).select_from(Organization)):
             log.info("Organizations already exist, demo data skipped")
+            seed_staffing_for_existing_demo(db)
             return
         seed_demo(db, args.orgs)
+
+
+def seed_staffing_for_existing_demo(db: Session) -> None:
+    """Демо-база, созданная до появления раздела нормативной численности, получает
+    и его демо-данные. Рабочую базу (без демо-пользователей) не трогаем."""
+    if db.scalar(select(User.id).where(User.email == "analyst@demo.ru")) is None:
+        return
+    director = db.scalar(select(User).where(User.email == "director@demo.ru"))
+    if db.scalar(select(func.count()).select_from(NormativeDocument)):
+        if seed_staffing.seed_payroll_for_existing_demo(db, director.organization_id
+                                                        if director else None):
+            db.commit()
+            log.info("Payroll demo data added to the existing demo database")
+        return
+    seed_staffing.seed_staffing_demo(db, director.organization_id if director else None)
+    db.commit()
+    log.info("Staffing demo data added to the existing demo database")
 
 
 if __name__ == "__main__":

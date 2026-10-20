@@ -12,10 +12,12 @@ import {
 
 import { api, OrgRequest, RequestKind, RequestMeta, RequestStats, RequestStatus } from '../api'
 import { useUser } from '../App'
+import { useLive, useLlmStatus } from '../live'
 import { STATUS_COLOR, StatusBar } from '../components/blocks'
 import { AXIS, ChartTip, Legend, Meter, SERIES } from '../components/charts'
 import { Icon, IconName } from '../components/icons'
 import { Grouping, GROUPINGS, RequestTree } from '../components/RequestTree'
+import { StaffingContextBlock } from '../components/staffing/StaffingContextBlock'
 import {
   Async,
   Avatar,
@@ -32,6 +34,7 @@ import {
   Tabs,
 } from '../components/ui'
 import {
+  debounce,
   fmtDateTime,
   fmtDay,
   fmtHours,
@@ -53,6 +56,7 @@ const EVENT_ICON: Record<string, IconName> = {
   assignee: 'user',
   deadline: 'clock',
   effort: 'wrench',
+  staffing: 'scale',
 }
 
 const EFFORT_BY: Record<string, string> = {
@@ -185,6 +189,9 @@ function NewRequest({
   const buildings =
     meta.organizations.find((o) => String(o.id) === draft.organization)?.buildings ?? []
   const topic = meta.topics.find((t) => t.code === draft.topic)
+  const llm = useLlmStatus().data
+  // Модель выключена или не отвечает — тема будет по ключевым словам, и об этом лучше знать заранее
+  const noModel = llm !== null && llm.available === false && !draft.topic
 
   async function submit() {
     const created = await api<OrgRequest>('/requests', {
@@ -286,6 +293,18 @@ function NewRequest({
             </select>
           </Field>
         </div>
+        {noModel && (
+          <div className="notice" role="status">
+            <Icon name="alert" />
+            <span>
+              {llm?.configured
+                ? 'Языковая модель сейчас не отвечает'
+                : 'Языковая модель не подключена'}
+              : тему определим по ключевым словам в тексте. Если тема важна, выберите её сами в поле
+              «Тема».
+            </span>
+          </div>
+        )}
         <p className="muted">
           Тему, ответственного и срок система определит сама: исполнителем станет наименее
           загруженный сотрудник нужной службы.
@@ -333,11 +352,15 @@ function situation(request: OrgRequest) {
     case 'new':
       return 'Исполнитель пока не найден. Руководитель назначит его вручную.'
     case 'assigned':
-      return who
-        ? `Исполнитель — ${who}. Заявку ещё не взяли в работу.`
-        : `Направлена бригаде «${request.brigade?.name}». Её возьмёт первый освободившийся участник.`
+      if (who) return `Исполнитель — ${who}. Заявку ещё не взяли в работу.`
+      return request.brigade
+        ? `Направлена бригаде «${request.brigade.name}». Её возьмёт первый освободившийся участник.`
+        : 'Исполнителя нет. Руководитель назначит его вручную.'
     case 'in_progress':
-      return `Заявку выполняет ${who}.`
+      if (who) return `Заявку выполняет ${who}.`
+      return request.brigade
+        ? `Заявку выполняет бригада «${request.brigade.name}».`
+        : 'Заявка в работе, но исполнителя нет. Руководитель назначит его вручную.'
     case 'on_hold':
       return 'Исполнитель задал вопрос и ждёт ответа заявителя. Пока ждём, срок не идёт.'
     case 'done':
@@ -361,8 +384,17 @@ interface Action {
 function describe(status: RequestStatus, request: OrgRequest): Action {
   switch (status) {
     case 'in_progress':
-      return request.status === 'done'
-        ? { status, label: 'Вернуть на доработку', tone: '', needsText: 'Напишите, что не сделано' }
+      if (request.status === 'done') {
+        return {
+          status,
+          label: 'Вернуть на доработку',
+          tone: '',
+          needsText: 'Напишите, что не сделано',
+        }
+      }
+      // Ответа заявителя не дождались, но работу можно продолжить
+      return request.status === 'on_hold'
+        ? { status, label: 'Продолжить работу', tone: '' }
         : { status, label: 'Взять в работу', tone: 'primary' }
     case 'on_hold':
       return { status, label: 'Задать вопрос заявителю', tone: '', needsText: 'Напишите вопрос' }
@@ -688,6 +720,31 @@ function SplitDialog({
   )
 }
 
+/** Значение для <input type="datetime-local"> в часовом поясе браузера. */
+function toLocalInput(value: string) {
+  const date = new Date(value)
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+
+/** Подставляет в список перечитанные заявки: изменившиеся заменяет, новые добавляет,
+ *  а те, что пользователю больше не видны, убирает. */
+function merge(current: OrgRequest[] | null, ids: number[], fresh: OrgRequest[]) {
+  if (!current) return current
+  const changed = new Set(ids)
+  const byId = new Map(fresh.map((r) => [r.id, r]))
+  const known = new Set(current.map((r) => r.id))
+  const kept = current.flatMap((r) => {
+    if (!changed.has(r.id)) return [r]
+    const next = byId.get(r.id)
+    return next ? [next] : []
+  })
+  const added = fresh.filter((r) => !known.has(r.id))
+  if (!added.length) return kept
+  return [...added, ...kept].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  )
+}
+
 function RequestDrawer({
   id,
   onClose,
@@ -707,21 +764,55 @@ function RequestDrawer({
   const [splitting, setSplitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Что поменял кто-то другой, пока карточка открыта
+  const [outside, setOutside] = useState<string | null>(null)
   const input = useRef<HTMLTextAreaElement>(null)
+  const reload = state.reload
+  const lastStatus = useRef<RequestStatus | null>(null)
+  const acting = useRef(false)
+
+  useEffect(() => {
+    const status = state.data?.status ?? null
+    if (lastStatus.current && status && lastStatus.current !== status && !acting.current) {
+      setOutside(
+        `Пока карточка была открыта, статус изменился: «${REQUEST_STATUS[lastStatus.current].label}» → «${REQUEST_STATUS[status].label}».`,
+      )
+    }
+    lastStatus.current = status
+  }, [state.data?.status])
+
+  // Карточка обновляется сама, когда заявку или её этапы меняет кто-то другой
+  const refresh = useMemo(() => debounce(() => void reload({ silent: true }), 300), [reload])
+  useEffect(() => refresh.cancel, [refresh])
+  useLive((event) => {
+    if (event.type !== 'requests') return
+    const current = state.data
+    const related = [id, current?.parent?.id, ...(current?.children?.map((c) => c.id) ?? [])]
+    if (event.all || event.ids?.some((changed) => related.includes(changed))) refresh()
+  })
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true)
+    acting.current = true
     setError(null)
+    setOutside(null)
     try {
       await action()
       setText('')
       setDue(null)
-      await state.reload()
+      // Статус поменяли мы сами — подсказка «изменилось без вас» тут не нужна
+      lastStatus.current = null
+      await reload()
       onChanged()
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось выполнить действие')
+      // Действие могло не пройти потому, что заявку уже изменили: покажем, что сейчас
+      void reload({ silent: true })
+      return false
     } finally {
       setBusy(false)
+      acting.current = false
     }
   }
 
@@ -739,6 +830,14 @@ function RequestDrawer({
   }
 
   const closed = request.status === 'closed' || request.status === 'rejected'
+  // Выполненную заявку не переназначают: её принимают или возвращают на доработку
+  const canAssign = request.can_manage && !closed && request.status !== 'done'
+  const assignable = request.assignable ?? []
+  // Нынешний исполнитель может не входить в список (например, его назначил администратор)
+  const people =
+    request.assignee && !assignable.some((p) => p.id === request.assignee!.id)
+      ? [request.assignee, ...assignable]
+      : assignable
   const isAssignee = request.assignee?.id === user.id
   const canComment = !closed && user.role !== 'observer'
   // Синей остаётся одна кнопка — следующий обычный шаг, остальные действия рядом
@@ -828,6 +927,12 @@ function RequestDrawer({
       }
     >
       <StatusPath request={request} />
+      {outside && (
+        <div className="notice notice-info" role="status">
+          <Icon name="refresh" />
+          <span>{outside}</span>
+        </div>
+      )}
       {request.my_turn ? (
         <div className="notice notice-info turn-notice">
           <Icon name="arrow" />
@@ -867,6 +972,7 @@ function RequestDrawer({
         )}
 
       <p style={{ whiteSpace: 'pre-wrap' }}>{request.text}</p>
+      {request.staffing && <StaffingContextBlock items={request.staffing} />}
       {request.resolution && (
         <div className="notice notice-info">
           <Icon name="check" />
@@ -892,7 +998,10 @@ function RequestDrawer({
           {request.can_manage &&
             !closed &&
             (due === null ? (
-              <button className="ghost small" onClick={() => setDue('')}>
+              <button
+                className="ghost small"
+                onClick={() => setDue(request.due_at ? toLocalInput(request.due_at) : '')}
+              >
                 Изменить срок
               </button>
             ) : (
@@ -925,7 +1034,7 @@ function RequestDrawer({
         </dd>
         <dt>Исполнитель</dt>
         <dd>
-          {request.can_manage && !closed && request.assignable ? (
+          {canAssign && request.assignable ? (
             <select
               value={
                 request.assignee
@@ -957,7 +1066,7 @@ function RequestDrawer({
                 </optgroup>
               )}
               <optgroup label="Сотрудники">
-                {request.assignable.map((p) => (
+                {people.map((p) => (
                   <option key={`u${p.id}`} value={`u${p.id}`}>
                     {p.name} — {ROLE_LABELS[p.role]}
                   </option>
@@ -1005,7 +1114,7 @@ function RequestDrawer({
                             method: 'PATCH',
                             body: { effort_hours: Number(hours.replace(',', '.')) },
                           }),
-                        ).then(() => setHours(null))
+                        ).then((ok) => ok && setHours(null))
                       }
                     >
                       Сохранить
@@ -1078,7 +1187,8 @@ function RequestDrawer({
           request={request}
           onClose={() => setSplitting(false)}
           onDone={() => {
-            void state.reload()
+            lastStatus.current = null
+            void reload()
             onChanged()
           }}
         />
@@ -1350,17 +1460,48 @@ export function Requests() {
 
   const open = (id: number | null) => setParams(id ? { open: String(id) } : {}, { replace: true })
 
+  const { reload, setData } = state
+
   async function changed() {
     // Счётчики в меню живут в другом компоненте — подскажем им обновиться
     window.dispatchEvent(new Event('requests-changed'))
-    await state.reload()
+    await reload({ silent: true })
   }
 
-  // Данные обновляются сами: статусы меняются и без участия пользователя
+  // Изменения других людей приходят по потоку событий: перечитываем только
+  // изменившиеся заявки, а пачку событий подряд — одним запросом
+  const pending = useRef({ ids: new Set<number>(), all: false })
+  const flush = useMemo(
+    () =>
+      debounce(() => {
+        const { ids, all } = pending.current
+        pending.current = { ids: new Set(), all: false }
+        if (all || ids.size > 200) {
+          void reload({ silent: true })
+          return
+        }
+        if (!ids.size) return
+        const list = [...ids]
+        api<OrgRequest[]>('/requests', { query: { ids: list.join(',') } })
+          .then((fresh) => setData((current) => merge(current, list, fresh)))
+          // Не вышло — поправит следующее событие или плановое обновление
+          .catch(() => {})
+      }, 300),
+    [reload, setData],
+  )
+  useEffect(() => flush.cancel, [flush])
+  useLive((event) => {
+    if (event.type !== 'requests') return
+    if (event.all) pending.current.all = true
+    event.ids?.forEach((id) => pending.current.ids.add(id))
+    flush()
+  })
+
+  // Изредка перечитываем всё: просрочка наступает со временем, без всяких событий
   useEffect(() => {
-    const timer = setInterval(() => void state.reload(), 60_000)
+    const timer = setInterval(() => void reload({ silent: true }), 120_000)
     return () => clearInterval(timer)
-  }, [state.reload])
+  }, [reload])
 
   useEffect(() => localStorage.setItem(GROUPING_KEY, grouping), [grouping])
 
