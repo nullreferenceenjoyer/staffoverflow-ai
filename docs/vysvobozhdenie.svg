@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="900" viewBox="0 0 1100 900" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/>
+    </marker>
+  </defs>
+  <rect width="1100" height="900" fill="#ffffff"/>
+
+  <text x="550" y="40" text-anchor="middle" font-size="24" font-weight="700" fill="#111827">Как считается высвобождение ставок</text>
+  <text x="550" y="66" text-anchor="middle" font-size="15" fill="#4b5563">по каждой должности в каждой школе, потом всё складывается</text>
+
+  <!-- Входы -->
+  <g>
+    <rect x="40" y="95" width="320" height="110" rx="12" fill="#eef4ff" stroke="#2a78d6" stroke-width="2"/>
+    <text x="200" y="128" text-anchor="middle" font-size="18" font-weight="700" fill="#1e3a8a">НОРМАТИВ</text>
+    <text x="200" y="154" text-anchor="middle" font-size="15" fill="#1f2937">сколько ставок НУЖНО</text>
+    <text x="200" y="178" text-anchor="middle" font-size="13" fill="#4b5563">задаёт управление образования</text>
+    <text x="200" y="196" text-anchor="middle" font-size="13" fill="#4b5563">пример: 5 ставок уборщиков</text>
+  </g>
+  <g>
+    <rect x="390" y="95" width="320" height="110" rx="12" fill="#eef4ff" stroke="#2a78d6" stroke-width="2"/>
+    <text x="550" y="128" text-anchor="middle" font-size="18" font-weight="700" fill="#1e3a8a">ШТАТКА</text>
+    <text x="550" y="154" text-anchor="middle" font-size="15" fill="#1f2937">сколько ставок ЕСТЬ</text>
+    <text x="550" y="178" text-anchor="middle" font-size="13" fill="#4b5563">штатное расписание школы</text>
+    <text x="550" y="196" text-anchor="middle" font-size="13" fill="#4b5563">пример: 7 ставок</text>
+  </g>
+  <g>
+    <rect x="740" y="95" width="320" height="110" rx="12" fill="#eef4ff" stroke="#2a78d6" stroke-width="2"/>
+    <text x="900" y="128" text-anchor="middle" font-size="18" font-weight="700" fill="#1e3a8a">ФАКТ</text>
+    <text x="900" y="154" text-anchor="middle" font-size="15" fill="#1f2937">сколько ЗАНЯТО людьми</text>
+    <text x="900" y="178" text-anchor="middle" font-size="13" fill="#4b5563">и сколько из них — совмещение</text>
+    <text x="900" y="196" text-anchor="middle" font-size="13" fill="#4b5563">пример: занято 6, совмещение 0,5</text>
+  </g>
+
+  <path d="M200 205 L200 240 L520 240 L520 262" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M550 205 L550 262" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M900 205 L900 240 L580 240 L580 262" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Сравнение -->
+  <rect x="300" y="265" width="500" height="80" rx="12" fill="#f9fafb" stroke="#6b7280" stroke-width="2"/>
+  <text x="550" y="298" text-anchor="middle" font-size="18" font-weight="700" fill="#111827">ЛИШНИЕ = ЕСТЬ − НУЖНО</text>
+  <text x="550" y="325" text-anchor="middle" font-size="15" fill="#374151">пример: 7 − 5 = 2 лишние ставки</text>
+
+  <path d="M800 305 L860 305" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="865" y="265" width="195" height="80" rx="12" fill="#ecfdf5" stroke="#0c8a0c" stroke-width="2"/>
+  <text x="962" y="294" text-anchor="middle" font-size="14" font-weight="700" fill="#065f46">0 или меньше?</text>
+  <text x="962" y="315" text-anchor="middle" font-size="13" fill="#065f46">в норме / не хватает —</text>
+  <text x="962" y="333" text-anchor="middle" font-size="13" fill="#065f46">ничего не сокращаем</text>
+
+  <path d="M550 345 L550 385" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="565" y="372" font-size="14" fill="#4b5563">лишние есть — убираем по шагам, от мягкого к жёсткому</text>
+
+  <!-- Шаги -->
+  <g>
+    <rect x="40" y="390" width="320" height="200" rx="12" fill="#eef4ff" stroke="#2a78d6" stroke-width="2"/>
+    <circle cx="72" cy="422" r="17" fill="#2a78d6"/>
+    <text x="72" y="428" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">1</text>
+    <text x="100" y="428" font-size="18" font-weight="700" fill="#1e3a8a">Пустые ставки</text>
+    <text x="60" y="462" font-size="14" fill="#1f2937">Вакансии сверх нормы —</text>
+    <text x="60" y="482" font-size="14" fill="#1f2937">убрать из штатки.</text>
+    <text x="60" y="508" font-size="14" font-weight="700" fill="#0c8a0c">Людей не касается.</text>
+    <text x="60" y="540" font-size="13" fill="#4b5563">пример: в штатке 7, занято 6 →</text>
+    <text x="60" y="558" font-size="13" fill="#4b5563">1 пустая ставка. Осталось</text>
+    <text x="60" y="576" font-size="13" fill="#4b5563">убрать ещё 2 − 1 = 1</text>
+  </g>
+  <path d="M360 490 L385 490" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <g>
+    <rect x="390" y="390" width="320" height="200" rx="12" fill="#fff7e6" stroke="#b7791f" stroke-width="2"/>
+    <circle cx="422" cy="422" r="17" fill="#b7791f"/>
+    <text x="422" y="428" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">2</text>
+    <text x="450" y="428" font-size="18" font-weight="700" fill="#7c4a03">Совмещение</text>
+    <text x="410" y="462" font-size="14" fill="#1f2937">Человек работает больше</text>
+    <text x="410" y="482" font-size="14" fill="#1f2937">чем на ставку — снять доплату.</text>
+    <text x="410" y="508" font-size="14" font-weight="700" fill="#0c8a0c">Человек остаётся на работе.</text>
+    <text x="410" y="540" font-size="13" fill="#4b5563">пример: совмещение 0,5 → снять.</text>
+    <text x="410" y="558" font-size="13" fill="#4b5563">Осталось убрать</text>
+    <text x="410" y="576" font-size="13" fill="#4b5563">1 − 0,5 = 0,5</text>
+  </g>
+  <path d="M710 490 L735 490" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <g>
+    <rect x="740" y="390" width="320" height="200" rx="12" fill="#fdecec" stroke="#d03b3b" stroke-width="2"/>
+    <circle cx="772" cy="422" r="17" fill="#d03b3b"/>
+    <text x="772" y="428" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">3</text>
+    <text x="800" y="428" font-size="18" font-weight="700" fill="#991b1b">Сокращение</text>
+    <text x="760" y="462" font-size="14" fill="#1f2937">Только то, что осталось —</text>
+    <text x="760" y="482" font-size="14" fill="#1f2937">сократить занятую ставку.</text>
+    <text x="760" y="508" font-size="14" font-weight="700" fill="#d03b3b">Касается людей: процедура ТК РФ.</text>
+    <text x="760" y="540" font-size="13" fill="#4b5563">пример: сократить 0,5 ставки.</text>
+    <text x="760" y="558" font-size="13" fill="#4b5563">Уведомление за 2 месяца,</text>
+    <text x="760" y="576" font-size="13" fill="#4b5563">предложить вакансии</text>
+  </g>
+
+  <path d="M200 590 L200 625 L520 625 L520 645" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M550 590 L550 645" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M900 590 L900 625 L580 625 L580 645" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Итог -->
+  <rect x="190" y="648" width="720" height="92" rx="12" fill="#111827"/>
+  <text x="550" y="680" text-anchor="middle" font-size="19" font-weight="700" fill="#ffffff">ВЫСВОБОДИТЬ = шаг 1 + шаг 2 + шаг 3</text>
+  <text x="550" y="705" text-anchor="middle" font-size="15" fill="#e5e7eb">пример: 1 + 0,5 + 0,5 = 2 ставки, из них людей касается 0,5</text>
+  <text x="550" y="728" text-anchor="middle" font-size="14" fill="#9ca3af">экономия в год = ставки × оклад × 12 месяцев × 1,302 (налоги)</text>
+
+  <!-- Особые случаи -->
+  <rect x="40" y="770" width="320" height="105" rx="12" fill="#f9fafb" stroke="#d1d5db"/>
+  <text x="60" y="798" font-size="15" font-weight="700" fill="#111827">Уборщицы — проверка</text>
+  <text x="60" y="822" font-size="13" fill="#374151">нужно = большее из</text>
+  <text x="60" y="842" font-size="13" fill="#374151">«классы ÷ 3» и «площадь ÷ 600 м²»</text>
+  <text x="60" y="862" font-size="13" fill="#374151">дальше — те же шаги 1–2–3</text>
+
+  <rect x="390" y="770" width="320" height="105" rx="12" fill="#f9fafb" stroke="#d1d5db"/>
+  <text x="410" y="798" font-size="15" font-weight="700" fill="#111827">Хозотдел — ещё и по заявкам</text>
+  <text x="410" y="822" font-size="13" fill="#374151">нужно = часы заявок ÷ 77 ч на ставку</text>
+  <text x="410" y="842" font-size="13" fill="#374151">(за 90 дней, заявки — 25 % времени)</text>
+  <text x="410" y="862" font-size="13" fill="#374151">бригады: (заявки + дорога) ÷ время людей</text>
+
+  <rect x="740" y="770" width="320" height="105" rx="12" fill="#f9fafb" stroke="#d1d5db"/>
+  <text x="760" y="798" font-size="15" font-weight="700" fill="#111827">Уволили по приказу</text>
+  <text x="760" y="822" font-size="13" fill="#374151">в штатке «занято» меньше →</text>
+  <text x="760" y="842" font-size="13" fill="#374151">ставка из шага 3 переходит в шаг 1,</text>
+  <text x="760" y="862" font-size="13" fill="#374151">всего «высвободить» то же</text>
+</svg>

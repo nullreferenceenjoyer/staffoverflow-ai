@@ -24,3 +24,11 @@ def point(obj) -> tuple[float, float] | None:
     if obj.latitude is None or obj.longitude is None:
         return None
     return float(obj.latitude), float(obj.longitude)
+
+
+def km_between(a, b) -> float | None:
+    """Расстояние между двумя объектами с координатами; None — у кого-то их нет."""
+    here, there = point(a), point(b)
+    if here is None or there is None:
+        return None
+    return distance_km(*here, *there)

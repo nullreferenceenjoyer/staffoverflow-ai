@@ -39,7 +39,7 @@ from app.models import (
     User,
     brigade_organizations,
 )
-from app.services import effort, routing
+from app.services import app_settings, effort, geo, routing
 
 S = RequestStatus
 ACTIVE = (S.new, S.assigned, S.in_progress, S.on_hold)
@@ -172,8 +172,18 @@ def can_manage(user: User, request: IncomingRequest) -> bool:
         # в управление образования, директор сам себе закрыть не может
         same_org = request.organization_id == user.organization_id
         mine = ((Role.executor,) if user.role == Role.executor
-                else (Role.executor, Role.director, Role.brigade))
+                else (Role.executor, Role.director, Role.brigade, Role.cleaner))
         return same_org and request.routed_role in mine
+    return False
+
+
+def can_assign(user: User, request: IncomingRequest) -> bool:
+    """Менять распределение — кому или какой бригаде отдана заявка — может только
+    управление образования (в своём муниципалитете) и администратор."""
+    if user.role in (Role.admin, Role.regional_analyst):
+        return True
+    if user.role == Role.municipal_specialist:
+        return request.organization.municipality_id == user.municipality_id
     return False
 
 
@@ -198,7 +208,7 @@ def my_turn(user: User, request: IncomingRequest) -> str | None:
     # Открытая заявка, которую никто не делает (не нашёлся исполнитель, его сняли,
     # бригаду расформировали), не должна теряться: ход за руководителем
     if (request.status in (S.new, S.assigned, S.in_progress) and request.assignee_id is None
-            and request.brigade_id is None and can_manage(user, request)):
+            and request.brigade_id is None and can_assign(user, request)):
         return "Назначьте исполнителя"
     return None
 
@@ -206,22 +216,35 @@ def my_turn(user: User, request: IncomingRequest) -> str | None:
 def candidates(db: Session, request: IncomingRequest, role: str) -> list[User]:
     """Кто с этой ролью может взять заявку — с учётом учреждения и территории."""
     query = select(User).where(User.role == role, User.is_active)
-    if role in (Role.executor, Role.director):
+    if role in (Role.executor, Role.director, Role.cleaner):
         query = query.where(User.organization_id == request.organization_id)
     elif role == Role.municipal_specialist:
         query = query.where(User.municipality_id == request.organization.municipality_id)
     return list(db.scalars(query.order_by(User.id)))
 
 
+# Сколько часов считать за открытую заявку, у которой нет оценки трудоёмкости
+UNKNOWN_HOURS = 1.5
+
+
+def open_hours(db: Session, column, ids: list[int]) -> dict[int, float]:
+    """Часы открытой работы по исполнителям или бригадам: очередь в часах, а не в штуках —
+    одна замена труб весит больше пяти лампочек."""
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(column, func.sum(func.coalesce(IncomingRequest.effort_hours, UNKNOWN_HOURS)))
+        .where(column.in_(ids), IncomingRequest.status.in_(ACTIVE))
+        .group_by(column)
+    ).all()
+    return {key: float(hours or 0) for key, hours in rows}
+
+
 def least_loaded(db: Session, users: list[User]) -> User | None:
+    """Свободнее всех — у кого меньше часов открытой работы."""
     if not users:
         return None
-    load = dict(db.execute(
-        select(IncomingRequest.assignee_id, func.count())
-        .where(IncomingRequest.assignee_id.in_([u.id for u in users]),
-               IncomingRequest.status.in_(ACTIVE))
-        .group_by(IncomingRequest.assignee_id)
-    ).all())
+    load = open_hours(db, IncomingRequest.assignee_id, [u.id for u in users])
     return min(users, key=lambda u: (load.get(u.id, 0), u.id))
 
 
@@ -246,18 +269,39 @@ def brigade_load(db: Session, brigade_ids: list[int]) -> dict[int, int]:
     ).all())
 
 
-def pick_brigade(db: Session, request: IncomingRequest) -> Brigade | None:
-    """Наименее загруженная бригада: открытых заявок на одного участника."""
+def pick_brigade(db: Session, request: IncomingRequest) -> tuple[Brigade | None, str]:
+    """Бригада, которая быстрее всех доберётся до работы: очередь в часах на одного
+    участника плюс дорога от базы до учреждения. Возвращает бригаду и пояснение."""
     brigades = brigades_for(db, request)
     if not brigades:
-        return None
-    load = brigade_load(db, [b.id for b in brigades])
-    return min(brigades, key=lambda b: (
-        load.get(b.id, 0) / max(sum(m.is_active for m in b.members), 1), b.id))
+        return None, ""
+    speed = app_settings.workload(db)["travel_speed_kmh"]
+    queue = open_hours(db, IncomingRequest.brigade_id, [b.id for b in brigades])
+
+    def score(brigade: Brigade) -> tuple[float, int]:
+        people = max(sum(m.is_active for m in brigade.members), 1)
+        km = geo.km_between(brigade, request.organization)
+        road = 0.0 if km is None else km / speed
+        return queue.get(brigade.id, 0) / people + road, brigade.id
+
+    best = min(brigades, key=score)
+    if len(brigades) == 1:
+        return best, ""
+    km = geo.km_between(best, request.organization)
+    parts = [f"очередь {queue.get(best.id, 0):g} ч"]
+    if km is not None:
+        parts.insert(0, f"{km:.1f} км".replace(".", ","))
+    return best, f"быстрее всех доберётся: {', '.join(parts)}"
 
 
 def route(db: Session, request: IncomingRequest) -> tuple[User | None, Brigade | None, str]:
     """Кому отдать заявку: (исполнитель, бригада, почему). Меняет routed_role."""
+    if request.topic == "cleaning" and request.kind != RequestKind.emergency:
+        # Уборку в первую очередь делают уборщики самого учреждения
+        cleaner = least_loaded(db, candidates(db, request, Role.cleaner))
+        if cleaner is not None:
+            request.routed_role = Role.cleaner
+            return cleaner, None, "уборщик учреждения"
     if effort.is_field(request.topic) and request.routed_role == Role.executor:
         heavy = request.complexity != Complexity.simple
         emergency = request.kind == RequestKind.emergency
@@ -266,12 +310,12 @@ def route(db: Session, request: IncomingRequest) -> tuple[User | None, Brigade |
                                                                             "brigade")
         for option in (*order, Role.director, Role.municipal_specialist):
             if option == "brigade":
-                brigade = pick_brigade(db, request)
+                brigade, detail = pick_brigade(db, request)
                 if brigade is not None:
                     request.routed_role = Role.brigade
                     why = ("работа сложная" if heavy and not emergency
                            else "в учреждении нет сотрудника хозслужбы")
-                    return None, brigade, why
+                    return None, brigade, f"{why}; {detail}" if detail else why
                 continue
             user = least_loaded(db, candidates(db, request, option))
             if user is not None:
@@ -323,7 +367,7 @@ def workers(request: IncomingRequest) -> list[User]:
 
 # Роли, на которые переходит заявка вместе с исполнителем
 WORKER_ROLES = (Role.executor, Role.director, Role.brigade, Role.municipal_specialist,
-                Role.regional_analyst, Role.admin)
+                Role.regional_analyst, Role.admin, Role.cleaner)
 
 
 def _give(request: IncomingRequest, user: User) -> None:
@@ -498,7 +542,13 @@ def change_status(db: Session, request: IncomingRequest, actor: User, status: st
     returned = request.status == S.done and status == S.in_progress
     previous = request.status
     if manager and request.assignee is None and status in (S.in_progress, S.on_hold, S.done):
-        # Кто взялся, тот и исполнитель
+        # Кто взялся, тот и исполнитель. Но заявку бригады берёт её участник: забрать
+        # её себе — значит перераспределить, а это решает управление образования
+        if (request.brigade_id is not None and actor.brigade_id != request.brigade_id
+                and not can_assign(actor, request)):
+            raise Forbidden("Заявка направлена бригаде — её возьмёт участник бригады. "
+                            "Передать её другому может сотрудник управления образования "
+                            "или администратор")
         _give(request, actor)
         log(request, actor, "assignee", f"Исполнитель: {actor.full_name}", moment)
     _set_status(request, status, moment)

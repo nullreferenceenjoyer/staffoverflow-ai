@@ -610,8 +610,10 @@ input[type='range'] {
   font-size: 10px;
 }
 
+/* На широком мониторе страница стоит по центру, а не прижата к меню */
 main {
-  max-width: 1480px;
+  max-width: 2048px;
+  margin: 0 auto;
   padding: 8px 32px 56px;
 }
 
@@ -811,10 +813,44 @@ main {
   align-items: start;
 }
 
+/* Карточки дашборда: на широком экране три в ряд, на ноутбуке — две, третья во всю ширину */
+.grid-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: start;
+}
+
+.grid-board > :last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 1600px) {
+  .grid-board {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .grid-board > :last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
+
+/* Очень широкий экран: правой колонке больше места, чтобы она не выглядела приклеенной */
+@media (min-width: 1700px) {
+  .grid-wide {
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 1180px) {
   .grid-2,
+  .grid-board,
   .grid-wide {
     grid-template-columns: 1fr;
+  }
+
+  .grid-board > :last-child:nth-child(odd) {
+    grid-column: auto;
   }
 }
 
@@ -2980,6 +3016,30 @@ input.fte {
   border-bottom: 1px solid var(--border);
 }
 
+/* Разъяснения ИИ: школа и должность — рядом с заголовком, на телефоне переносятся вниз */
+.explain-head {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.explain-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.explain-filters select {
+  max-width: 320px;
+}
+
+@media (max-width: 600px) {
+  .explain-filters,
+  .explain-filters select {
+    width: 100%;
+    max-width: none;
+  }
+}
+
 .assistant-thread {
   display: flex;
   flex: 1;
@@ -3309,4 +3369,1138 @@ input.salary {
 
 .drawer.drawer-wide {
   width: min(900px, 100vw);
+}
+
+/* --- Итог: сколько ставок лишние --- */
+
+.summary-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px 32px;
+  margin-bottom: 18px;
+  padding: 20px 22px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  animation: rise 0.5s var(--ease) both;
+}
+
+.summary-hero.has-surplus {
+  background: linear-gradient(120deg, var(--serious-soft), var(--surface) 70%);
+  border-color: color-mix(in srgb, var(--serious) 30%, var(--border));
+}
+
+.summary-hero-main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.summary-hero-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: var(--good-soft);
+  color: var(--good);
+}
+
+.has-surplus .summary-hero-icon {
+  background: var(--serious-soft);
+  color: var(--serious);
+}
+
+.summary-hero-label {
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.summary-hero-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-hero-value span {
+  color: var(--text-2);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.summary-hero-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13.5px;
+}
+
+.bucket-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.bucket-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.bucket-card.is-surplus {
+  border-color: color-mix(in srgb, var(--serious) 35%, var(--border));
+}
+
+.bucket-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bucket-value {
+  display: flex;
+  flex-direction: column;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.bucket-value small {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.bucket-facts {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.bucket-facts dt {
+  color: var(--muted);
+}
+
+.bucket-facts dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+button.bucket-load {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+
+button.bucket-load .meter-row {
+  padding: 0;
+}
+
+.cut-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cut-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.cut-list li:last-child {
+  border-bottom: none;
+}
+
+.cut-list li > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cut-list li > span:last-child {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.rank-no {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.unit-details-row > td {
+  background: var(--surface-2);
+}
+
+.unit-details {
+  padding: 6px 4px 4px;
+}
+
+.unit-details h3 {
+  margin: 4px 0 8px;
+  font-size: 14px;
+}
+
+.name-list span {
+  display: block;
+}
+
+/* --- Нормативы простыми словами --- */
+
+.norms-simple td:first-child {
+  width: 38%;
+}
+
+.norm-rules {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.norm-rules li + li {
+  margin-top: 4px;
+}
+
+.norm-sentences {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.norm-sentences li + li {
+  margin-top: 6px;
+}
+
+.norm-sentence-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+
+.norm-sentence-edit input {
+  width: 84px;
+  text-align: right;
+}
+
+/* --- Программа оптимизации --- */
+
+.program-hero {
+  margin-bottom: 18px;
+  padding: 20px 22px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.program-hero-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.program-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.program-figures > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.program-figures strong {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.program-figures span {
+  font-weight: 550;
+}
+
+.program-figures small {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.program-explain {
+  margin: 14px 0 0;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+
+/* Кого касается и почему: шаги высвобождения ставок */
+.who-why-intro {
+  margin: 0 0 12px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.who-why-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.who-why-steps > li {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.who-why-steps > li.is-empty {
+  opacity: 0.6;
+}
+
+.who-why-num {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.who-why-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.who-why-head span {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.who-why-steps dl {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.who-why-steps dt {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.who-why-steps dd {
+  margin: 1px 0 0;
+}
+
+/* Дашборды уборщиц и хозотдела */
+/* Строка-кнопка: школа или бригада, по нажатию — карточка подробно */
+.row-button {
+  display: block;
+  width: 100%;
+  margin: 0 -8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row-button:hover {
+  background: var(--surface-2);
+}
+
+.row-button .meter-row:hover {
+  transform: none;
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.link-button:hover strong {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.scroll-list {
+  max-height: 440px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.detail-requests {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detail-requests li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.detail-requests li > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-requests-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.board-sub {
+  margin-top: 20px;
+}
+
+.board-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.board-facts dt {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.board-facts dd {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+button.bucket-button {
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+
+button.bucket-button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+button.bucket-button:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.warn-text {
+  color: var(--warn);
+}
+
+.next-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+
+.next-card > span:nth-child(2) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+button.next-card:hover {
+  border-color: var(--border-strong);
+}
+
+.rule-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: var(--primary-soft);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.rule-box > div {
+  flex: 1 1 420px;
+}
+
+.formula {
+  margin: 8px 0 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.formula-line {
+  padding: 2px 0;
+}
+
+.formula-result {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.calc-big {
+  margin: 4px 0 8px;
+}
+
+.verdict {
+  font-weight: 600;
+}
+
+.verdict-big {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.positions-total {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin-bottom: 14px;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 15px;
+}
+
+.school-facts {
+  margin-top: 10px;
+}
+
+/* --- Подсказки «Как считается» --- */
+
+details.how {
+  margin: 14px 0 18px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+
+details.how > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--primary);
+  cursor: pointer;
+  font-weight: 550;
+  list-style: none;
+}
+
+details.how > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.how[open] > summary {
+  margin-bottom: 10px;
+}
+
+.how-body p {
+  margin: 0 0 10px;
+}
+
+.how-list,
+.rules-list {
+  margin: 0 0 12px;
+  padding-left: 0;
+  list-style: none;
+}
+
+.how-list li,
+.rules-list li {
+  margin-bottom: 8px;
+}
+
+.how-list li {
+  padding-left: 14px;
+  position: relative;
+}
+
+.how-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.6em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.rules-list li {
+  display: flex;
+  gap: 10px;
+}
+
+.rule-mark {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-weight: 700;
+}
+
+/* --- Что сделать (директор) --- */
+
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.action-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.action-cut,
+.action-cut_by_load {
+  border-left-color: var(--serious);
+}
+
+.action-cut_vacant {
+  border-left-color: var(--primary);
+}
+
+.action-hire {
+  border-left-color: var(--critical);
+}
+
+.action-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-cost {
+  margin-left: auto;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.action-positions {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.action-positions li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 3px 0;
+}
+
+.action-line {
+  margin: 8px 0 0;
+}
+
+.action-why {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.action-why > summary {
+  color: var(--primary);
+  cursor: pointer;
+}
+
+.bucket-more {
+  margin-left: auto;
+}
+
+.norm-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.norm-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  align-items: center;
+  gap: 12px;
+}
+
+.norm-bar .meter-row {
+  grid-template-columns: minmax(140px, 260px) 1fr 70px;
+  padding: 2px 0;
+}
+
+/* --- Штатка по должностям --- */
+
+.group-row > td {
+  background: var(--surface-2);
+}
+
+.group-row-inner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px 14px;
+}
+
+.group-row-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.position-row td:first-child {
+  padding-left: 22px;
+}
+
+.facts-row dd small {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+@media (max-width: 720px) {
+  .norm-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .position-row td:first-child {
+    padding-left: 0;
+  }
+}
+
+details.more {
+  margin-top: 6px;
+}
+
+details.more > summary {
+  margin-bottom: 14px;
+  color: var(--primary);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+@media (max-width: 720px) {
+  .summary-hero-value {
+    font-size: 28px;
+  }
+
+  .cut-list li {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .cut-list li > span:last-child {
+    align-items: flex-start;
+  }
+}
+
+/* --- движение: вкладки, кнопки, переливы --- */
+
+/* Плавная кривая с лёгкой «пружиной» в конце — для того, что переезжает */
+:root {
+  --glide: cubic-bezier(0.32, 0.72, 0, 1);
+  --spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+/* Вкладки и переключатели: подложка переезжает под выбранный пункт */
+.tabs,
+.seg {
+  position: relative;
+  isolation: isolate;
+}
+
+.tabs .slider,
+.seg .slider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: -1;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow:
+    0 1px 3px rgba(16, 24, 40, 0.12),
+    0 0 0 1px color-mix(in srgb, var(--primary) 8%, transparent);
+  transition:
+    transform 0.42s var(--glide),
+    width 0.42s var(--glide),
+    height 0.42s var(--glide),
+    opacity 0.2s;
+}
+
+.tabs button.active,
+.seg button.active {
+  background: none;
+  box-shadow: none;
+}
+
+.tabs button,
+.seg button {
+  transition:
+    color 0.25s,
+    transform 0.25s var(--spring);
+}
+
+.tabs button:active:not(:disabled),
+.seg button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+/* Содержимое вкладки: проявляется и чуть поднимается, блоки — по очереди */
+.reveal {
+  animation: reveal 0.45s var(--glide) both;
+}
+
+.reveal > * {
+  animation: rise 0.55s var(--glide) both;
+}
+
+.reveal > *:nth-child(2) {
+  animation-delay: 0.04s;
+}
+
+.reveal > *:nth-child(3) {
+  animation-delay: 0.08s;
+}
+
+.reveal > *:nth-child(4) {
+  animation-delay: 0.12s;
+}
+
+.reveal > *:nth-child(n + 5) {
+  animation-delay: 0.16s;
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+  }
+}
+
+/* Кнопки: пружинящее нажатие, иконка чуть оживает */
+button {
+  transition:
+    background 0.2s,
+    border-color 0.2s,
+    box-shadow 0.25s,
+    transform 0.3s var(--spring),
+    color 0.2s;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: 0.08s;
+}
+
+button svg {
+  transition: transform 0.3s var(--spring);
+}
+
+button:hover:not(:disabled) svg {
+  transform: scale(1.1);
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 4px color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+/* Основная кнопка: градиент и пробегающий блик при наведении */
+button.primary {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+}
+
+button.primary::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.35) 50%,
+    transparent 70%
+  );
+  transform: translateX(-120%);
+  transition: transform 0.75s var(--glide);
+  pointer-events: none;
+}
+
+button.primary:hover:not(:disabled)::after {
+  transform: translateX(120%);
+}
+
+/* Кнопки в шапке раздела — одной группой, без переноса на вторую строку */
+.page-actions {
+  flex: none;
+  flex-wrap: nowrap;
+}
+
+.page-actions:has(> button.ghost) {
+  gap: 2px;
+  padding: 3px;
+  border-radius: 12px;
+  background: var(--surface-3);
+}
+
+.page-actions > button.ghost:hover:not(:disabled) {
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.1);
+}
+
+/* Итог: по верхнему краю бежит цветная полоса, крупные цифры один раз «вспыхивают» */
+.program-hero {
+  position: relative;
+  overflow: hidden;
+}
+
+.program-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--series-1),
+    var(--series-3),
+    var(--series-2),
+    var(--series-1)
+  );
+  background-size: 300% 100%;
+  animation: flow 8s linear infinite;
+}
+
+.program-figures strong {
+  background: linear-gradient(
+    90deg,
+    var(--text) 0%,
+    var(--text) 42%,
+    var(--primary) 50%,
+    var(--text) 58%,
+    var(--text) 100%
+  );
+  background-size: 300% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: text-sheen 2.2s var(--glide) 0.35s both;
+}
+
+@keyframes flow {
+  to {
+    background-position: 300% 0;
+  }
+}
+
+@keyframes text-sheen {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+/* Карточки показателей: при наведении по ним проходит мягкий блик */
+.kpi::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 38%,
+    color-mix(in srgb, var(--primary) 12%, transparent) 50%,
+    transparent 62%
+  );
+  transform: translateX(-110%);
+  transition: transform 0.9s var(--glide);
+  pointer-events: none;
+}
+
+.kpi:hover::after {
+  transform: translateX(110%);
+}
+
+/* Карточки шагов и бригад слегка приподнимаются под курсором */
+.who-why-steps > li,
+.brigade-card,
+.bucket-card {
+  transition:
+    transform 0.35s var(--glide),
+    box-shadow 0.35s var(--glide),
+    border-color 0.2s;
+}
+
+.who-why-steps > li:hover,
+.brigade-card:hover,
+button.bucket-button:hover:not(:disabled) {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow);
+}
+
+/* Боковая панель и окно: въезд по плавной кривой, содержимое — следом */
+.drawer {
+  animation: slide-in 0.5s var(--glide);
+}
+
+.drawer-body > * {
+  animation: rise 0.5s var(--glide) both;
+  animation-delay: 0.12s;
+}
+
+.modal {
+  animation: pop 0.4s var(--spring);
+}
+
+/* Строки-кнопки: подсветка плавно наплывает */
+.row-button {
+  transition:
+    background 0.25s,
+    transform 0.25s var(--glide);
+}
+
+.row-button:hover {
+  transform: translateX(3px);
+}
+
+/* Метка «сходится с расчётом» один раз мягко светится */
+.program-hero-head .badge {
+  animation: glow 1.6s var(--glide) 0.6s both;
+}
+
+@keyframes glow {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+
+@media (max-width: 600px) {
+  .page-actions {
+    flex-wrap: wrap;
+  }
+
+  .page-actions > button {
+    flex: 1;
+  }
 }

@@ -32,6 +32,7 @@ class Role(enum.StrEnum):
     executor = "executor"  # хозяйственная служба на точке: работает в одном учреждении
     brigade = "brigade"  # участник выездной бригады: ездит по закреплённым учреждениям
     employee = "employee"  # сотрудник учреждения: подаёт заявки и видит только свои
+    cleaner = "cleaner"  # уборщик учреждения: получает заявки по уборке своего учреждения
 
 
 class OrgType(enum.StrEnum):
@@ -389,7 +390,9 @@ class StaffingSchedule(Base):
 
 
 class StaffingLine(Base):
-    """Строка штатки: утверждённые и занятые ставки группы, без привязки к людям."""
+    """Строка штатки — должность: утверждённые и занятые ставки, оклад. Должность входит
+    в группу нормирования (уборщик и гардеробщик — «Уборка помещений»): норматив считается
+    по группе, а сокращать и добавлять можно конкретные должности."""
 
     __tablename__ = "staffing_lines"
 
@@ -403,9 +406,15 @@ class StaffingLine(Base):
     building_id: Mapped[int | None] = mapped_column(
         ForeignKey("buildings.id", ondelete="SET NULL")
     )
+    # Название должности. Пусто — строка завели итогом по группе (старые данные, загрузка
+    # без колонки «Должность»): показывается первая типовая должность группы
+    position: Mapped[str | None] = mapped_column(String(200))
     approved_fte: Mapped[Decimal] = mapped_column(Numeric(7, 2), default=0)
     # Пусто — занятость не ведётся, анализ «по занятости» для группы невозможен
     occupied_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    # Из занятых — совмещение и дополнительная нагрузка: эти ставки снимаются уменьшением
+    # нагрузки, без увольнения
+    combined_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
     # Средний оклад за одну ставку группы, ₽ в месяц. Итог по группе, не по людям
     salary_rub: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     comment: Mapped[str | None] = mapped_column(String(500))
@@ -458,6 +467,11 @@ class InstitutionMetrics(Base):
     classes_count: Mapped[int | None]
     groups_count: Mapped[int | None]
     total_area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 1))
+    # Кабинеты и другие помещения, которые убирают: «1 уборщик на 30 кабинетов»
+    rooms_count: Mapped[int | None]
+    # Сколько ставок уборщиц и своего хозотдела в школе сейчас — для простых расчётов
+    cleaners_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    maintenance_fte: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
     source: Mapped[str] = mapped_column(String(16), default="manual")  # manual | import | external
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -556,6 +570,94 @@ class AssistantMessage(Base):
     role: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- программа оптимизации штатных расписаний (факт по документам) ---------------------
+
+
+class ProgramSchool(Base):
+    """Сколько ставок высвободила школа и за счёт чего — из расчёта управления."""
+
+    __tablename__ = "program_schools"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), unique=True
+    )
+    sort_order: Mapped[int] = mapped_column(default=0)
+    total: Mapped[Decimal] = mapped_column(Numeric(9, 3), default=0)
+    vacancies: Mapped[Decimal] = mapped_column(Numeric(9, 3), default=0)
+    load_reduction: Mapped[Decimal] = mapped_column(Numeric(9, 3), default=0)
+    resignations: Mapped[Decimal] = mapped_column(Numeric(9, 3), default=0)
+    layoffs: Mapped[Decimal] = mapped_column(Numeric(9, 3), default=0)
+    hours: Mapped[int] = mapped_column(default=0)
+    staff_units: Mapped[int] = mapped_column(default=0)  # «шт. ед.» в паспорте
+    orders_note: Mapped[str | None] = mapped_column(String(500))
+
+    organization: Mapped[Organization] = relationship()
+
+
+class ProgramPosition(Base):
+    """Строка расчёта по должностям: было, сократили, стало и экономия в месяц."""
+
+    __tablename__ = "program_positions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sort_order: Mapped[int] = mapped_column(default=0)
+    category: Mapped[str] = mapped_column(String(200))
+    name: Mapped[str] = mapped_column(String(200))
+    before_fte: Mapped[Decimal] = mapped_column(Numeric(10, 3), default=0)
+    cut_fte: Mapped[Decimal] = mapped_column(Numeric(10, 3), default=0)
+    after_fte: Mapped[Decimal] = mapped_column(Numeric(10, 3), default=0)
+    local_cut: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
+    local_economy_month: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    regional_cut: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
+    regional_economy_month: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+
+
+class Dismissal(Base):
+    """Уволенный по программе сотрудник: кто, откуда, на основании какого приказа."""
+
+    __tablename__ = "dismissals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    full_name: Mapped[str] = mapped_column(String(200))
+    position: Mapped[str] = mapped_column(String(300))
+    fte: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=1)
+    basis: Mapped[str] = mapped_column(String(16))  # own — по собственному, layoff — сокращение
+    article: Mapped[str | None] = mapped_column(String(200))
+    order_number: Mapped[str | None] = mapped_column(String(60))
+    order_date: Mapped[date | None] = mapped_column(Date)
+    dismissed_on: Mapped[date | None] = mapped_column(Date)
+    notified_on: Mapped[date | None] = mapped_column(Date)  # уведомление о сокращении
+    note: Mapped[str | None] = mapped_column(String(500))
+    source: Mapped[str | None] = mapped_column(String(300))  # файл приказа
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Учтено в штатке: в какой строке и на сколько уменьшили «занято» (и совмещение).
+    # Пусто — увольнение в штатке не учтено (например, загружено из документов «до»)
+    line_id: Mapped[int | None] = mapped_column(
+        ForeignKey("staffing_lines.id", ondelete="SET NULL")
+    )
+    applied_fte: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    applied_combined: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+
+    organization: Mapped[Organization] = relationship()
+    line: Mapped[StaffingLine | None] = relationship()
+
+
+class AppSetting(Base):
+    """Настройки, которые меняют в интерфейсе: например, нормы загрузки хозслужбы."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class AuditLog(Base):

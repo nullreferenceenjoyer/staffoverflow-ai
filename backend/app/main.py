@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api import admin, assistant, auth, live, misc, norms, requests, staffing
+from app.api import admin, assistant, auth, live, misc, norms, program, requests, staffing
 from app.config import get_settings
 from app.db import get_db
 from app.services import llm
@@ -48,7 +48,7 @@ app = FastAPI(
 )
 
 api = APIRouter(prefix="/api")
-for module in (auth, requests, misc, admin, live, staffing, norms, assistant):
+for module in (auth, requests, misc, admin, live, staffing, norms, assistant, program):
     api.include_router(module.router)
 
 

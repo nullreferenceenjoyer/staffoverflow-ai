@@ -39,7 +39,7 @@ const STAFFING_ROLES: User['role'][] = [
 
 const NAV: NavItem[] = [
   { to: '/requests', label: 'Заявки', icon: 'inbox' },
-  { to: '/staffing', label: 'Нормативная численность', icon: 'scale', roles: STAFFING_ROLES },
+  { to: '/staffing', label: 'Оптимизация штата', icon: 'scale', roles: STAFFING_ROLES },
   { to: '/admin', label: 'Администрирование', icon: 'shield', roles: ['admin'] },
 ]
 

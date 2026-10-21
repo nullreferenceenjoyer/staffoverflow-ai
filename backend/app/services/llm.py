@@ -2,15 +2,16 @@
 
 Работает с любым сервером, который понимает OpenAI-совместимый
 /v1/chat/completions: llama.cpp (сервис llm в docker-compose), LM Studio, Ollama.
-Модель нужна только для определения темы заявки. В тексте заявки бывают фамилии,
-поэтому внешние сервисы не поддерживаются вовсе.
+Модель определяет тему заявки, отвечает в помощнике и объясняет расчёт сокращений.
+В текстах бывают фамилии, поэтому внешние сервисы не поддерживаются вовсе.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -178,3 +179,55 @@ def complete(messages: list[dict], *, max_tokens: int | None = None) -> str:
     if not text:
         raise LLMUnavailable("Модель вернула пустой ответ")
     return text
+
+
+def stream(messages: list[dict], *, max_tokens: int | None = None) -> Iterator[str]:
+    """Ответ модели по кускам, по мере генерации: первый текст виден через секунду,
+    а не после всего ответа. Блок <think>…</think> в начале пропускается."""
+    settings = get_settings()
+    if not settings.llm_base_url:
+        raise LLMUnavailable(NOT_CONFIGURED)
+    headers = {"Authorization": f"Bearer {settings.llm_api_key}"} if settings.llm_api_key else {}
+    payload = {**_payload(messages, max_tokens), "stream": True}
+    head, thinking, started = "", False, False
+    try:
+        with httpx.stream("POST", f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                          json=payload, headers=headers,
+                          timeout=httpx.Timeout(settings.llm_timeout_s, connect=5.0)) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    choice = json.loads(data)["choices"][0]
+                except (ValueError, KeyError, IndexError):
+                    continue
+                piece = (choice.get("delta") or {}).get("content") or ""
+                if not piece:
+                    continue
+                if started:
+                    yield piece
+                    continue
+                # Пока не ясно, начинается ли ответ с рассуждений, копим начало
+                head += piece
+                if not thinking and head.lstrip().startswith("<think>"):
+                    thinking = True
+                if thinking:
+                    if "</think>" not in head:
+                        continue
+                    head = head.split("</think>", 1)[1]
+                    thinking = False
+                text = head.lstrip()
+                if text and (len(text) >= 7 or "<" not in text):
+                    started = True
+                    yield text
+            if not started and head.strip() and not thinking:
+                yield head.strip()
+    except httpx.HTTPError as exc:
+        log.warning("LLM stream failed: %s", exc)
+        _record(False, f"Модель не ответила: {exc}")
+        raise LLMUnavailable(f"Модель не ответила: {exc}") from exc
+    _record(True)

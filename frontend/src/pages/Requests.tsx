@@ -31,6 +31,7 @@ import {
   Kpi,
   Modal,
   Page,
+  Reveal,
   Tabs,
 } from '../components/ui'
 import {
@@ -830,8 +831,9 @@ function RequestDrawer({
   }
 
   const closed = request.status === 'closed' || request.status === 'rejected'
-  // Выполненную заявку не переназначают: её принимают или возвращают на доработку
-  const canAssign = request.can_manage && !closed && request.status !== 'done'
+  // Распределение меняет только управление образования и администратор. Выполненную
+  // заявку не переназначают: её принимают или возвращают на доработку
+  const canAssign = request.can_assign && !closed && request.status !== 'done'
   const assignable = request.assignable ?? []
   // Нынешний исполнитель может не входить в список (например, его назначил администратор)
   const people =
@@ -1074,7 +1076,14 @@ function RequestDrawer({
               </optgroup>
             </select>
           ) : (
-            <Worker request={request} />
+            <>
+              <Worker request={request} />
+              {request.can_manage && !closed && (
+                <div className="muted small-text">
+                  Сменить исполнителя или бригаду может управление образования
+                </div>
+              )}
+            </>
           )}
           <div className="muted">Отвечает: {ROLE_LABELS[request.routed_role]}</div>
         </dd>
@@ -1445,7 +1454,7 @@ export function Requests() {
   const state = useApi<OrgRequest[]>('/requests')
   const meta = useApi<RequestMeta>('/requests/meta')
   // Сотруднику и хозяйственной службе сводка и доска ни к чему: заявок у них немного
-  const simple = user.role === 'employee' || user.role === 'executor'
+  const simple = ['employee', 'executor', 'cleaner'].includes(user.role)
   const [tab, setTab] = useState<Tab>('tree')
   const [grouping, setGrouping] = useState<Grouping>(() => {
     const saved = localStorage.getItem(GROUPING_KEY) as Grouping | null
@@ -1553,80 +1562,82 @@ export function Requests() {
     >
       {!simple && <Tabs value={tab} onChange={setTab} tabs={tabs} />}
 
-      {tab === 'stats' ? (
-        <StatsView
-          onFilter={() => {
-            setStatus(null)
-            setOverdue(true)
-            setTab('tree')
-          }}
-        />
-      ) : (
-        <>
-          <Pipeline requests={searched} value={status} onChange={setStatus} />
+      <Reveal id={tab === 'stats' ? 'stats' : 'list'}>
+        {tab === 'stats' ? (
+          <StatsView
+            onFilter={() => {
+              setStatus(null)
+              setOverdue(true)
+              setTab('tree')
+            }}
+          />
+        ) : (
+          <>
+            <Pipeline requests={searched} value={status} onChange={setStatus} />
 
-          <div className="toolbar">
-            <button
-              className={`chip ${mine ? 'chip-on' : ''}`}
-              aria-pressed={mine}
-              onClick={() => setMine(!mine)}
-            >
-              Ждут меня · {myTurn}
-            </button>
-            <button
-              className={`chip ${overdue ? 'chip-on chip-late' : ''}`}
-              aria-pressed={overdue}
-              onClick={() => setOverdue(!overdue)}
-            >
-              Просрочены · {late}
-            </button>
-            <input
-              type="search"
-              placeholder="Поиск: номер, текст, учреждение, исполнитель"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            {tab === 'tree' && (
-              <select
-                value={grouping}
-                onChange={(e) => setGrouping(e.target.value as Grouping)}
-                aria-label="Группировка"
+            <div className="toolbar">
+              <button
+                className={`chip ${mine ? 'chip-on' : ''}`}
+                aria-pressed={mine}
+                onClick={() => setMine(!mine)}
               >
-                {GROUPINGS.map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            )}
-            <span className="spacer" />
-            <span className="muted">
-              {status ? PIPELINE.find(([s]) => s === status)?.[1] : 'Открытые'}: {filtered.length}
-            </span>
-          </div>
+                Ждут меня · {myTurn}
+              </button>
+              <button
+                className={`chip ${overdue ? 'chip-on chip-late' : ''}`}
+                aria-pressed={overdue}
+                onClick={() => setOverdue(!overdue)}
+              >
+                Просрочены · {late}
+              </button>
+              <input
+                type="search"
+                placeholder="Поиск: номер, текст, учреждение, исполнитель"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              {tab === 'tree' && (
+                <select
+                  value={grouping}
+                  onChange={(e) => setGrouping(e.target.value as Grouping)}
+                  aria-label="Группировка"
+                >
+                  {GROUPINGS.map(([key, label]) => (
+                    <option key={key} value={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <span className="spacer" />
+              <span className="muted">
+                {status ? PIPELINE.find(([s]) => s === status)?.[1] : 'Открытые'}: {filtered.length}
+              </span>
+            </div>
 
-          <Async state={state}>
-            {() =>
-              filtered.length === 0 ? (
-                <Empty>
-                  {state.data?.length
-                    ? 'Под выбранные условия заявок нет. Снимите фильтр или выберите другой этап.'
-                    : 'Заявок пока нет. Чтобы создать первую, нажмите «Новая заявка» справа вверху.'}
-                </Empty>
-              ) : tab === 'board' ? (
-                <Board
-                  requests={filtered}
-                  columns={status ? [status] : BOARD}
-                  onOpen={open}
-                  onChanged={changed}
-                />
-              ) : (
-                <RequestTree requests={filtered} grouping={grouping} onOpen={open} />
-              )
-            }
-          </Async>
-        </>
-      )}
+            <Async state={state}>
+              {() =>
+                filtered.length === 0 ? (
+                  <Empty>
+                    {state.data?.length
+                      ? 'Под выбранные условия заявок нет. Снимите фильтр или выберите другой этап.'
+                      : 'Заявок пока нет. Чтобы создать первую, нажмите «Новая заявка» справа вверху.'}
+                  </Empty>
+                ) : tab === 'board' ? (
+                  <Board
+                    requests={filtered}
+                    columns={status ? [status] : BOARD}
+                    onOpen={open}
+                    onChanged={changed}
+                  />
+                ) : (
+                  <RequestTree requests={filtered} grouping={grouping} onOpen={open} />
+                )
+              }
+            </Async>
+          </>
+        )}
+      </Reveal>
 
       {creating && meta.data && (
         <NewRequest

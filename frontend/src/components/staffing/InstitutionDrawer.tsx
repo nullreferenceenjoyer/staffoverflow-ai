@@ -25,6 +25,9 @@ export function MetricsLine({ metrics }: { metrics: StaffingInstitution['metrics
     metrics.classes_count !== null && `классов ${fmt(metrics.classes_count as number)}`,
     metrics.groups_count !== null && `групп ${fmt(metrics.groups_count as number)}`,
     metrics.total_area_m2 !== null && `площадь ${fmt(metrics.total_area_m2 as number)} м²`,
+    metrics.rooms_count !== null &&
+      metrics.rooms_count !== undefined &&
+      `кабинетов ${fmt(metrics.rooms_count as number)}`,
   ].filter(Boolean)
   const schedule =
     metrics.schedule_status === 'approved'

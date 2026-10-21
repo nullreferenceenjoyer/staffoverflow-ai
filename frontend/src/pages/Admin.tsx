@@ -1,9 +1,9 @@
 import { useState } from 'react'
 
 import { Brigade, Municipality, Organization, RequestMeta, User } from '../api'
-import { Page, Tabs } from '../components/ui'
+import { Page, Reveal, Tabs } from '../components/ui'
 import { useApi } from '../lib'
-import { Brigades } from './admin/Brigades'
+import { Brigades, OnSiteStaff } from './admin/Brigades'
 import { Organizations } from './admin/Organizations'
 import { Audit, Users } from './admin/Users'
 
@@ -37,7 +37,7 @@ export function Admin() {
   return (
     <Page
       title="Администрирование"
-      hint="Пользователи и их привязка, учёт учреждений, выездные бригады и журнал действий."
+      hint="Пользователи и их привязка, учёт учреждений, хозяйственные работы (бригады и хозотделы школ) и журнал действий."
     >
       <Tabs
         value={tab}
@@ -45,26 +45,31 @@ export function Admin() {
         tabs={[
           ['users', 'Пользователи'],
           ['organizations', 'Учреждения'],
-          ['brigades', 'Бригады'],
+          ['brigades', 'Хозяйственные работы'],
           ['audit', 'Журнал'],
         ]}
       />
-      {!directory ? (
-        <div className="skeleton" style={{ height: 240 }} />
-      ) : tab === 'users' ? (
-        <Users directory={directory} state={users} />
-      ) : tab === 'organizations' ? (
-        <Organizations municipalities={directory.municipalities} onChanged={reloadDirectory} />
-      ) : tab === 'brigades' ? (
-        <Brigades
-          municipalities={directory.municipalities}
-          topics={topics}
-          users={users.data ?? []}
-          onChanged={reloadDirectory}
-        />
-      ) : (
-        <Audit />
-      )}
+      <Reveal id={tab}>
+        {!directory ? (
+          <div className="skeleton" style={{ height: 240 }} />
+        ) : tab === 'users' ? (
+          <Users directory={directory} state={users} />
+        ) : tab === 'organizations' ? (
+          <Organizations municipalities={directory.municipalities} onChanged={reloadDirectory} />
+        ) : tab === 'brigades' ? (
+          <>
+            <Brigades
+              municipalities={directory.municipalities}
+              topics={topics}
+              users={users.data ?? []}
+              onChanged={reloadDirectory}
+            />
+            <OnSiteStaff users={users.data ?? []} directory={directory} />
+          </>
+        ) : (
+          <Audit />
+        )}
+      </Reveal>
     </Page>
   )
 }

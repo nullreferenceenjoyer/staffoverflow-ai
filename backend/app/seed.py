@@ -228,14 +228,17 @@ def seed_demo(db: Session, org_count: int, profile: dict | None = None) -> None:
     rng = random.Random(42)
 
     names = profile["municipalities"]
-    municipality_count = min(len(names), max(4, org_count // 6))
-    municipalities = [Municipality(name=name) for name in names[:municipality_count]]
+    # «okrug» в профиле — система работает в одном округе: все учреждения в нём
+    single = profile.get("okrug")
+    municipality_count = 1 if single else min(len(names), max(4, org_count // 6))
+    municipalities = [Municipality(name=name)
+                      for name in ([single] if single else names[:municipality_count])]
     db.add_all(municipalities)
     db.flush()
 
     for index in range(1, org_count + 1):
         # Половина учреждений — в пилотном округе, остальные поровну между прочими
-        pilot = index % 2 == 1
+        pilot = single or index % 2 == 1
         others = municipalities[1:]
         municipality = municipalities[0] if pilot else others[(index // 2 - 1) % len(others)]
         db.add(demo_organization(rng, municipality, index, mostly_complexes=pilot))
@@ -292,6 +295,16 @@ def seed_requests(db: Session, rng: random.Random, organizations: list[Organizat
         email = "executor@demo.ru" if number == 1 else f"executor{number}@demo.ru"
         db.add(User(email=email, full_name=name, role=Role.executor, organization_id=org.id,
                     password_hash=password_hash))
+    if len(organizations) > 1:
+        # Во втором учреждении хозотдел из двух человек, а работы на одного: анализ
+        # загрузки покажет одного лишнего
+        db.add(User(email="executor2b@demo.ru", full_name="Савин К. Л.", role=Role.executor,
+                    organization_id=organizations[1].id, password_hash=password_hash))
+    # Уборщики школы демо-директора: уборку и территорию система отдаёт им
+    for email, name in (("cleaner@demo.ru", "Петрова Н. В."), ("cleaner2@demo.ru",
+                                                                "Сазонова Л. М.")):
+        db.add(User(email=email, full_name=name, role=Role.cleaner,
+                    organization_id=first_org.id, password_hash=password_hash))
     db.add(employee)
     db.flush()
 
@@ -369,9 +382,26 @@ def main() -> None:
             return
         if db.scalar(select(func.count()).select_from(Organization)):
             log.info("Organizations already exist, demo data skipped")
+            keep_only_okrug(db, load_profile().get("okrug"))
             seed_staffing_for_existing_demo(db)
+            seed_workload_for_existing_demo(db)
+            director = db.scalar(select(User).where(User.email == "director@demo.ru"))
+            if seed_staffing.seed_positions_for_existing_demo(
+                    db, director.organization_id if director else None):
+                db.commit()
+                log.info("Staffing lines got position names")
+            load_program(db)
             return
         seed_demo(db, args.orgs)
+        load_program(db)
+
+
+def load_program(db: Session) -> None:
+    """Реальные данные программы (seed/program.local.json), если файл есть."""
+    from app.services import program
+
+    if program.load_from_settings(db):
+        db.commit()
 
 
 def seed_staffing_for_existing_demo(db: Session) -> None:
@@ -389,6 +419,77 @@ def seed_staffing_for_existing_demo(db: Session) -> None:
     seed_staffing.seed_staffing_demo(db, director.organization_id if director else None)
     db.commit()
     log.info("Staffing demo data added to the existing demo database")
+
+
+def keep_only_okrug(db: Session, name: str | None) -> None:
+    """Демо-база с несколькими округами, а профиль говорит «работаем в одном»: удаляет
+    демо-учреждения, бригады и пользователей других округов. Рабочую базу не трогает."""
+    from sqlalchemy import delete, or_
+
+    from app.models import NormativeCoefficient
+
+    if not name or db.scalar(select(User.id).where(User.email == "analyst@demo.ru")) is None:
+        return
+    keep = db.scalar(select(Municipality).where(Municipality.name == name))
+    if keep is None:
+        return
+    others = list(db.scalars(select(Municipality.id).where(Municipality.id != keep.id)))
+    if not others:
+        return
+    orgs = select(Organization.id).where(Organization.municipality_id.in_(others))
+    brigades = select(Brigade.id).where(Brigade.municipality_id.in_(others))
+    db.execute(delete(User).where(or_(User.organization_id.in_(orgs),
+                                      User.municipality_id.in_(others),
+                                      User.brigade_id.in_(brigades))))
+    db.execute(delete(Brigade).where(Brigade.municipality_id.in_(others)))
+    db.execute(delete(NormativeCoefficient).where(
+        ((NormativeCoefficient.scope_level == "municipality")
+         & NormativeCoefficient.scope_id.in_(others))
+        | ((NormativeCoefficient.scope_level == "organization")
+           & NormativeCoefficient.scope_id.in_(orgs))))
+    db.execute(delete(Organization).where(Organization.municipality_id.in_(others)))
+    db.execute(delete(Municipality).where(Municipality.id.in_(others)))
+    db.commit()
+    log.info("Demo database limited to %s", name)
+
+
+def seed_workload_for_existing_demo(db: Session) -> None:
+    """Демо-база, созданная до появления уборщиков и анализа загрузки, получает уборщиков,
+    второго сотрудника хозотдела и число кабинетов. Рабочую базу не трогаем."""
+    from app.models import InstitutionMetrics
+    from app.services import staffing_analysis
+
+    if db.scalar(select(User.id).where(User.email == "analyst@demo.ru")) is None:
+        return
+    if db.scalar(select(User.id).where(User.role == Role.cleaner).limit(1)) is not None:
+        return
+    password_hash = hash_password(DEMO_PASSWORD)
+    director = db.scalar(select(User).where(User.email == "director@demo.ru"))
+    if director and director.organization_id:
+        for email, name in (("cleaner@demo.ru", "Петрова Н. В."),
+                            ("cleaner2@demo.ru", "Сазонова Л. М.")):
+            if db.scalar(select(User.id).where(User.email == email)) is None:
+                db.add(User(email=email, full_name=name, role=Role.cleaner,
+                            organization_id=director.organization_id,
+                            password_hash=password_hash))
+    second = db.scalar(select(User).where(User.email == "executor2@demo.ru"))
+    if second and db.scalar(select(User.id).where(User.email == "executor2b@demo.ru")) is None:
+        db.add(User(email="executor2b@demo.ru", full_name="Савин К. Л.", role=Role.executor,
+                    organization_id=second.organization_id, password_hash=password_hash))
+    years = set()
+    for metrics in db.scalars(select(InstitutionMetrics)
+                              .where(InstitutionMetrics.rooms_count.is_(None))):
+        if metrics.groups_count and not metrics.classes_count:
+            metrics.rooms_count = metrics.groups_count * 4 + 6
+        elif metrics.students_count:
+            metrics.rooms_count = (round(metrics.students_count / 20)
+                                   + (metrics.groups_count or 0) * 4 + 10)
+        years.add(metrics.academic_year)
+    db.flush()
+    for year in years:
+        staffing_analysis.recalculate(db, year)
+    db.commit()
+    log.info("Cleaners, rooms and workload demo data added to the existing demo database")
 
 
 if __name__ == "__main__":

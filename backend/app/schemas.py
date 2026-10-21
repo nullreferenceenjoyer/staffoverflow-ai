@@ -171,9 +171,30 @@ class StaffingDataIn(BaseModel):
     classes_count: int | None = Field(None, ge=0, le=2_000)
     groups_count: int | None = Field(None, ge=0, le=2_000)
     total_area_m2: float | None = Field(None, ge=0, le=1_000_000)
-    lines: list[StaffingLineIn] = Field(default_factory=list, max_length=100)
+    rooms_count: int | None = Field(None, ge=0, le=5_000)
+    # Пусто — строки штатки не трогаем: должности правятся по одной (PositionIn)
+    lines: list[StaffingLineIn] | None = Field(None, max_length=100)
     status: Literal["draft", "approved"] = "draft"
     comment: str | None = Field(None, max_length=500)
+
+
+class PositionIn(BaseModel):
+    """Должность в штатке: название, группа нормирования, ставки и оклад."""
+
+    year: str = Field(pattern=r"^\d{4}/\d{4}$")
+    group_id: int
+    position: str = Field(min_length=2, max_length=200)
+    approved_fte: float = Field(ge=0, le=500)
+    # Пусто — занятость не ведётся
+    occupied_fte: float | None = Field(None, ge=0, le=500)
+    salary_rub: float | None = Field(None, gt=0, le=10_000_000)
+
+    @model_validator(mode="after")
+    def _clean(self):
+        self.position = " ".join(self.position.split())
+        if self.occupied_fte is not None and self.occupied_fte > self.approved_fte:
+            raise ValueError("Занято больше, чем ставок по штатке — проверьте цифры")
+        return self
 
 
 class RecalculateIn(BaseModel):
@@ -217,7 +238,8 @@ class NormCoefficientIn(BaseModel):
     institution_type: Literal["all", "school", "preschool", "complex"] = "all"
     scope_level: Literal["region", "municipality", "organization"] = "region"
     scope_id: int | None = None
-    metric: Literal["students_count", "classes_count", "groups_count", "total_area_m2", "none"]
+    metric: Literal["students_count", "classes_count", "groups_count", "total_area_m2",
+                    "rooms_count", "none"]
     unit_size: float | None = Field(None, gt=0, le=1_000_000)
     fte_per_unit: float = Field(ge=0, le=500)
     min_fte: float | None = Field(None, ge=0, le=500)
@@ -252,6 +274,73 @@ class NormCoefficientIn(BaseModel):
         elif self.scope_id is None:
             raise ValueError("Для местного норматива укажите муниципалитет или учреждение")
         return self
+
+
+class WorkloadSettingsIn(BaseModel):
+    """Нормы загрузки хозслужбы и бригад: по ним видно, сколько людей лишние."""
+
+    hours_per_day: float = Field(ge=1, le=12)
+    target_load_pct: float = Field(ge=30, le=100)
+    travel_speed_kmh: float = Field(ge=5, le=120)
+    default_hours: float = Field(ge=0.25, le=40)
+    min_people: float = Field(ge=0, le=10)
+    requests_share_pct: float = Field(25, ge=5, le=100)
+
+
+class DismissalIn(BaseModel):
+    """Уволенный по программе: школа, ФИО, должность, ставка и приказ."""
+
+    organization_id: int
+    full_name: str = Field(min_length=3, max_length=200)
+    position: str = Field(min_length=2, max_length=300)
+    fte: float = Field(gt=0, le=10)
+    basis: Literal["own", "layoff"]
+    article: str | None = Field(None, max_length=200)
+    order_number: str | None = Field(None, max_length=60)
+    order_date: date | None = None
+    dismissed_on: date | None = None
+    notified_on: date | None = None
+    note: str | None = Field(None, max_length=500)
+    # Учесть в штатке школы: «занято» по должности уменьшится, ставка станет вакантной
+    apply_to_schedule: bool = True
+
+
+class ExplainTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=4000)
+
+
+class ExplainWarmIn(BaseModel):
+    organization_id: int | None = None
+    position: str | None = Field(None, max_length=200)
+
+
+class ExplainIn(BaseModel):
+    """Вопрос к разъяснениям по высвобождению ставок."""
+
+    question: str = Field(min_length=2, max_length=1000)
+    organization_id: int | None = None
+    position: str | None = Field(None, max_length=200)
+    history: list[ExplainTurn] = Field(default_factory=list, max_length=12)
+
+
+class CleaningInputIn(BaseModel):
+    """Три цифры школы для расчёта уборщиц."""
+
+    year: str = Field(pattern=r"^\d{4}/\d{4}$")
+    classes_count: int | None = Field(None, ge=0, le=2_000)
+    total_area_m2: float | None = Field(None, ge=0, le=1_000_000)
+    cleaners_fte: float | None = Field(None, ge=0, le=500)
+
+
+class MaintenanceInputIn(BaseModel):
+    year: str = Field(pattern=r"^\d{4}/\d{4}$")
+    maintenance_fte: float | None = Field(None, ge=0, le=500)
+
+
+class CleaningNormIn(BaseModel):
+    classes_per_rate: float = Field(gt=0, le=100)
+    area_per_rate: float = Field(gt=0, le=100_000)
 
 
 class AssistantAskIn(BaseModel):

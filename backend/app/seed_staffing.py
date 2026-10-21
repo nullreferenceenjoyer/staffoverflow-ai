@@ -127,13 +127,15 @@ def _metrics(rng: random.Random, org: Organization) -> dict:
     if org.org_type == "preschool":
         groups = rng.randint(6, 14)
         return {"students_count": groups * rng.randint(18, 24), "classes_count": None,
-                "groups_count": groups, "total_area_m2": D(groups * rng.randint(130, 170))}
+                "groups_count": groups, "total_area_m2": D(groups * rng.randint(130, 170)),
+                "rooms_count": groups * 4 + 6}
     students = rng.randint(380, 1150)
     groups = rng.randint(3, 8) if org.org_type == "complex" else None
     area = students * rng.randint(9, 13) + (groups or 0) * 150
     return {"students_count": students + (groups or 0) * 20,
             "classes_count": max(round(students / 25), 11), "groups_count": groups,
-            "total_area_m2": D(area)}
+            "total_area_m2": D(area),
+            "rooms_count": round(students / 20) + (groups or 0) * 4 + 10}
 
 
 # Сколько групп учреждения расходятся с нормативом и насколько. Большинство — в норме
@@ -145,13 +147,73 @@ VACANCY = [D(x) for x in ("0",) * 10 + ("0.25", "0.5", "1")]
 
 # Пример из ТЗ: школа демо-директора
 EXAMPLE_METRICS = {"students_count": 840, "classes_count": 34, "groups_count": None,
-                   "total_area_m2": D(12000)}
+                   "total_area_m2": D(12000), "rooms_count": 52}
 EXAMPLE_LINES = {
     "aup_management": ("1", "1"), "aup_deputies": ("3.5", "3.5"), "aup_clerical": ("2", "2"),
     "aup_accounting": ("1", "0.5"), "aup_household": ("1", "1"),
     "support_edu": ("3.5", "3"), "support_cleaning": ("10", "9.5"), "support_security": ("2", "2"),
     "support_kitchen": ("4", "4"), "support_maintenance": ("4", "4"),
 }
+
+
+# Штатка школы демо-директора по должностям. Итоги по группам — как в EXAMPLE_LINES
+EXAMPLE_POSITIONS = {
+    "aup_deputies": [("Заместитель директора по УВР", "2", "2"),
+                     ("Заместитель директора по ВР", "1", "1"),
+                     ("Заместитель директора по безопасности", "0.5", "0.5")],
+    "support_edu": [("Педагог-психолог", "1", "1"), ("Учитель-логопед", "1", "0.5"),
+                    ("Социальный педагог", "0.5", "0.5"), ("Библиотекарь", "1", "1")],
+    "support_cleaning": [("Уборщик служебных помещений", "9", "8.5"),
+                         ("Гардеробщик", "1", "1")],
+    "support_kitchen": [("Повар", "3", "3"), ("Кухонный рабочий", "1", "1")],
+    "support_maintenance": [("Рабочий по комплексному обслуживанию здания", "2", "2"),
+                            ("Дворник", "1", "1"), ("Электромонтёр", "1", "1")],
+}
+
+
+def _example_lines(group: PersonnelGroup, approved: str, occupied: str) -> list[StaffingLine]:
+    parts = EXAMPLE_POSITIONS.get(group.code)
+    if not parts:
+        return [StaffingLine(personnel_group_id=group.id, position=default_position(group),
+                             approved_fte=D(approved), occupied_fte=D(occupied))]
+    return [StaffingLine(personnel_group_id=group.id, position=name, approved_fte=D(a),
+                         occupied_fte=D(o)) for name, a, o in parts]
+
+
+def default_position(group: PersonnelGroup) -> str:
+    first = (group.positions or "").split(",")[0].strip()
+    return first[:1].upper() + first[1:] if first else group.name
+
+
+def seed_positions_for_existing_demo(db: Session, example_org_id: int | None) -> bool:
+    """Демо-база, созданная до штатки по должностям: подписывает строки типовой должностью
+    группы, а штатку школы демо-директора раскладывает по должностям."""
+    lines = list(db.scalars(select(StaffingLine).where(StaffingLine.position.is_(None))))
+    if not lines:
+        return False
+    groups = {g.id: g for g in db.scalars(select(PersonnelGroup))}
+    schedules = {s.id: s for s in db.scalars(
+        select(StaffingSchedule).options(selectinload(StaffingSchedule.lines)))}
+    for line in lines:
+        schedule = schedules.get(line.schedule_id)
+        group = groups.get(line.personnel_group_id)
+        parts = EXAMPLE_POSITIONS.get(group.code) if group else None
+        same = [x for x in schedule.lines if x.personnel_group_id == line.personnel_group_id] \
+            if schedule else []
+        if (schedule and schedule.organization_id == example_org_id and parts
+                and len(same) == 1
+                and D(line.approved_fte) == sum((D(a) for _n, a, _o in parts), D(0))):
+            salary = line.salary_rub
+            schedule.lines.remove(line)
+            for name, a, o in parts:
+                schedule.lines.append(StaffingLine(
+                    personnel_group_id=line.personnel_group_id, position=name,
+                    approved_fte=D(a), occupied_fte=D(o) if line.occupied_fte is not None
+                    else None, salary_rub=salary))
+        else:
+            line.position = default_position(group) if group else None
+    db.flush()
+    return True
 
 
 def seed_staffing_demo(db: Session, first_org_id: int | None = None) -> None:
@@ -189,8 +251,7 @@ def seed_staffing_demo(db: Session, first_org_id: int | None = None) -> None:
         lines = []
         if example:
             for code, (approved, occupied) in EXAMPLE_LINES.items():
-                lines.append(StaffingLine(personnel_group_id=by_code[code].id,
-                                          approved_fte=D(approved), occupied_fte=D(occupied)))
+                lines.extend(_example_lines(by_code[code], approved, occupied))
         else:
             required: dict[int, Decimal] = {}
             for group in groups:
@@ -204,11 +265,15 @@ def seed_staffing_demo(db: Session, first_org_id: int | None = None) -> None:
             for group_id, fte in required.items():
                 approved = max(fte + (rng.choice(OFFSETS) if group_id in off else D(0)), D(0))
                 occupied = max(approved - rng.choice(VACANCY), D(0))
-                lines.append(StaffingLine(personnel_group_id=group_id, approved_fte=approved,
+                group = next(g for g in groups if g.id == group_id)
+                lines.append(StaffingLine(personnel_group_id=group_id,
+                                          position=default_position(group),
+                                          approved_fte=approved,
                                           occupied_fte=occupied if tracks_occupancy else None))
             if index % 10 == 6:
                 # Ставки по группе без норматива: анализ попросит его настроить
                 lines.append(StaffingLine(personnel_group_id=by_code["aup_other"].id,
+                                          position="Специалист по кадрам",
                                           approved_fte=D("0.5"), occupied_fte=D("0.5")))
         schedule.lines = lines
         db.add(schedule)

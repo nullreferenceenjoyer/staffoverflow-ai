@@ -209,7 +209,8 @@ def _apply_brigade(db: Session, brigade: Brigade, body: BrigadeIn) -> None:
     wrong = [u.full_name for u in members if u.role != Role.brigade]
     if wrong:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            f"Не участники бригад (роль «Выездная бригада»): {', '.join(wrong)}")
+                            f"Не участники бригад (группа «Хозяйственный отдел», в бригаде "
+                            f"управления образования): {', '.join(wrong)}")
     for user in list(brigade.members):
         if user.id not in body.member_ids:
             user.brigade_id = None

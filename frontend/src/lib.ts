@@ -83,16 +83,43 @@ export function fmtHours(hours: number | null) {
     : `${number.format(Math.round(hours / 2.4) / 10)} дн.`
 }
 
+// Людей в системе три вида: сотрудник (с группой), директор и администратор. Подпись роли —
+// это группа сотрудника: уборщик, хозяйственный отдел, сотрудник управления образования…
 export const ROLE_LABELS: Record<Role, string> = {
   admin: 'Администратор',
-  regional_analyst: 'Региональный аналитик',
-  municipal_specialist: 'Специалист управления образования',
-  director: 'Директор ОУ',
-  observer: 'Наблюдатель',
-  executor: 'Хозяйственная служба на точке',
-  brigade: 'Выездная бригада',
-  employee: 'Сотрудник ОУ',
+  regional_analyst: 'Сотрудник управления образования (все муниципалитеты)',
+  municipal_specialist: 'Сотрудник управления образования',
+  director: 'Директор',
+  observer: 'Наблюдатель (только просмотр)',
+  executor: 'Хозяйственный отдел учреждения',
+  brigade: 'Бригада управления образования',
+  employee: 'Сотрудник',
+  cleaner: 'Уборщик',
 }
+
+/** Кратко, для подписи в списках: «Хозотдел», «Бригада УО». */
+export const ROLE_SHORT: Record<Role, string> = {
+  admin: 'Администратор',
+  regional_analyst: 'Управление образования',
+  municipal_specialist: 'Управление образования',
+  director: 'Директор',
+  observer: 'Наблюдатель',
+  executor: 'Хозотдел',
+  brigade: 'Бригада УО',
+  employee: 'Сотрудник',
+  cleaner: 'Уборщик',
+}
+
+/** «1,5 ставки», «2 человека» — склонение по числу. */
+export function plural(value: number, one: string, few: string, many: string) {
+  if (!Number.isInteger(value)) return few
+  const n = Math.abs(value)
+  if (n % 10 === 1 && n % 100 !== 11) return one
+  if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return few
+  return many
+}
+
+export const fteWord = (value: number) => plural(value, 'ставка', 'ставки', 'ставок')
 
 export const REQUEST_STATUS: Record<string, { label: string; tone: string }> = {
   new: { label: 'Новая', tone: 'amber' },

@@ -493,10 +493,285 @@ function DocumentEditor({
   )
 }
 
+/** Норматив в виде тела запроса — чтобы простая форма меняла только то, что показывает. */
+function bodyOf(c: NormCoefficient) {
+  return {
+    group_id: c.group_id,
+    document_id: c.document_id,
+    institution_type: c.institution_type,
+    scope_level: c.scope_level,
+    scope_id: c.scope_id,
+    metric: c.metric,
+    unit_size: c.unit_size,
+    fte_per_unit: c.fte_per_unit,
+    min_fte: c.min_fte,
+    max_fte: c.max_fte,
+    applies_from: c.applies_from,
+    applies_to: c.applies_to,
+    rounding_step: c.rounding_step,
+    rounding_mode: c.rounding_mode,
+    tolerance_abs: c.tolerance_abs,
+    tolerance_pct: c.tolerance_pct,
+    priority: c.priority,
+    effective_from: c.effective_from,
+    effective_to: c.effective_to,
+    is_mandatory: c.is_mandatory,
+    comment: c.comment,
+  }
+}
+
+// Чем мерить: в простой форме — человеческими словами
+const SIMPLE_METRICS: [string, string][] = [
+  ['rooms_count', 'кабинетов'],
+  ['total_area_m2', 'м² площади'],
+  ['students_count', 'обучающихся'],
+  ['classes_count', 'классов'],
+  ['groups_count', 'групп детского сада'],
+]
+
+/** «1 уборщик на 30 кабинетов» — без округлений, допусков и документов. */
+function SimpleNormEditor({
+  meta,
+  coefficient,
+  onClose,
+  onSaved,
+  onAdvanced,
+}: {
+  meta: StaffingMeta
+  coefficient: NormCoefficient | null
+  onClose: () => void
+  onSaved: () => void
+  onAdvanced: () => void
+}) {
+  const user = useUser()
+  const regional = meta.permissions.edit_regional_norms
+  const cleaning = meta.groups.find((g) => g.code === 'support_cleaning')
+  const [draft, setDraft] = useState({
+    group_id: String(coefficient?.group_id ?? cleaning?.id ?? meta.groups[0]?.id ?? ''),
+    institution_type: coefficient?.institution_type ?? 'all',
+    fixed: coefficient ? coefficient.metric === 'none' || !coefficient.unit_size : false,
+    fte: text(coefficient?.fte_per_unit ?? 1),
+    unit: text(coefficient?.unit_size ?? 30),
+    metric:
+      coefficient && coefficient.metric !== 'none' ? coefficient.metric : ('rooms_count' as string),
+  })
+  const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) =>
+    setDraft({ ...draft, [key]: value })
+
+  async function save() {
+    const base = coefficient
+      ? bodyOf(coefficient)
+      : {
+          document_id: null,
+          scope_level: regional ? 'region' : 'municipality',
+          scope_id: regional ? null : user.municipality_id,
+          min_fte: null,
+          max_fte: null,
+          applies_from: null,
+          applies_to: null,
+          rounding_step: 0.25,
+          rounding_mode: 'up',
+          tolerance_abs: null,
+          tolerance_pct: null,
+          priority: 0,
+          effective_from: null,
+          effective_to: null,
+          is_mandatory: true,
+          comment: null,
+        }
+    const body = {
+      ...base,
+      group_id: Number(draft.group_id),
+      institution_type: draft.institution_type,
+      metric: draft.fixed ? 'none' : draft.metric,
+      unit_size: draft.fixed ? null : numberOrNull(draft.unit, 'На сколько'),
+      fte_per_unit: numberOrNull(draft.fte, 'Ставок') ?? 0,
+      ...(draft.fixed ? { applies_from: null, applies_to: null } : {}),
+    }
+    if (!draft.fixed && !body.unit_size) throw new Error('Укажите, на сколько единиц норма')
+    if (coefficient) await api(`/norms/coefficients/${coefficient.id}`, { method: 'PUT', body })
+    else await api('/norms/coefficients', { body })
+    onSaved()
+    onClose()
+  }
+
+  async function remove() {
+    if (!coefficient || !window.confirm('Удалить норму? Анализ будет пересчитан.')) return
+    await api(`/norms/coefficients/${coefficient.id}`, { method: 'DELETE' })
+    onSaved()
+    onClose()
+  }
+
+  return (
+    <Modal title={coefficient ? 'Норма' : 'Новая норма'} onClose={onClose}>
+      <Form onSubmit={save}>
+        <Field label="Должность (группа)">
+          <select value={draft.group_id} onChange={(e) => set('group_id', e.target.value)}>
+            {meta.groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Для каких учреждений">
+          <select
+            value={draft.institution_type}
+            onChange={(e) => set('institution_type', e.target.value)}
+          >
+            {meta.institution_types.map((t) => (
+              <option key={t.code} value={t.code}>
+                {t.title}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Segmented
+          label="Как считать"
+          value={draft.fixed ? 'fixed' : 'per'}
+          onChange={(v) => set('fixed', v === 'fixed')}
+          options={[
+            ['per', 'На количество'],
+            ['fixed', 'Фиксированно'],
+          ]}
+        />
+        <div className="norm-sentence-edit">
+          <input
+            inputMode="decimal"
+            aria-label="Ставок"
+            value={draft.fte}
+            onChange={(e) => set('fte', e.target.value)}
+            required
+          />
+          <span>{draft.fixed ? 'ставки на учреждение' : 'ставка на каждые'}</span>
+          {!draft.fixed && (
+            <>
+              <input
+                inputMode="decimal"
+                aria-label="На сколько единиц"
+                value={draft.unit}
+                onChange={(e) => set('unit', e.target.value)}
+                required
+              />
+              <select
+                value={draft.metric}
+                onChange={(e) => set('metric', e.target.value)}
+                aria-label="Чего"
+              >
+                {SIMPLE_METRICS.map(([code, title]) => (
+                  <option key={code} value={code}>
+                    {title}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+        </div>
+        <p className="muted">
+          Например: уборщик — 1 ставка на каждые 30 кабинетов или на 600 м²; хозяйственный отдел — 1
+          ставка на 3 000 м². Всё, что больше нормы, анализ покажет как лишние ставки.
+        </p>
+        <div className="actions wrap">
+          <button type="button" className="ghost" onClick={onAdvanced}>
+            Подробные настройки: округление, допуск, документ
+          </button>
+          {coefficient && (
+            <button type="button" className="danger" onClick={remove}>
+              Удалить норму
+            </button>
+          )}
+        </div>
+      </Form>
+    </Modal>
+  )
+}
+
+/** Нормы одной строкой на должность: «Уборка помещений — 1 ставка на 1 000 м²». */
+function SimpleNorms({
+  meta,
+  coefficients,
+  onEdit,
+  onAdd,
+}: {
+  meta: StaffingMeta
+  coefficients: NormCoefficient[]
+  onEdit: (c: NormCoefficient) => void
+  onAdd: () => void
+}) {
+  const canEdit = meta.permissions.edit_norms
+  const active = coefficients.filter((c) => c.state === 'active')
+  // Сначала то, на чём ищут лишних: уборщики и хозотдел
+  const first = ['support_cleaning', 'support_maintenance']
+  const groups = [...meta.groups].sort(
+    (a, b) =>
+      (first.includes(b.code) ? 1 : 0) - (first.includes(a.code) ? 1 : 0) ||
+      a.category.localeCompare(b.category),
+  )
+  return (
+    <Card
+      title="Нормы простыми словами"
+      aside={
+        canEdit && (
+          <button className="primary" onClick={onAdd}>
+            <Icon name="plus" size={16} /> Добавить норму
+          </button>
+        )
+      }
+    >
+      <p className="card-sub">
+        Сколько ставок положено учреждению. Всё, что сверх нормы, — лишние ставки, которые можно
+        сократить.
+      </p>
+      <table className="stack norms-simple">
+        <tbody>
+          {groups.map((g) => {
+            const rules = active.filter((c) => c.group_id === g.id)
+            return (
+              <tr key={g.id}>
+                <td data-label="Должность">
+                  <strong>{g.name}</strong>
+                  {g.positions && <div className="muted small-text">{g.positions}</div>}
+                </td>
+                <td data-label="Норма">
+                  {rules.length === 0 ? (
+                    <span className="muted">норма не задана — лишних не посчитать</span>
+                  ) : (
+                    <ul className="norm-rules">
+                      {rules.map((c) => (
+                        <li key={c.id}>
+                          {canEdit && c.can_edit ? (
+                            <button className="link" onClick={() => onEdit(c)}>
+                              {c.rule}
+                            </button>
+                          ) : (
+                            c.rule
+                          )}
+                          {(c.institution_type !== 'all' || c.scope_title) && (
+                            <span className="muted">
+                              {' '}
+                              · {c.institution_type_title.toLowerCase()}
+                              {c.scope_title ? `, только ${c.scope_title}` : ''}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </Card>
+  )
+}
+
 export function Norms({ meta }: { meta: StaffingMeta }) {
   const user = useUser()
   const coefficients = useApi<NormCoefficient[]>('/norms/coefficients')
   const documents = useApi<NormDocument[]>('/norms/documents')
+  const [simple, setSimple] = useState<NormCoefficient | 'new' | null>(null)
   const [category, setCategory] = useState<'all' | 'aup' | 'support'>('all')
   const [type, setType] = useState('')
   const [group, setGroup] = useState('')
@@ -529,191 +804,217 @@ export function Norms({ meta }: { meta: StaffingMeta }) {
       {user.role === 'director' && (
         <p className="muted">Показаны нормативы, которые применяются к вашему учреждению.</p>
       )}
-      <Card
-        title="Нормативы"
-        aside={
-          canEdit && (
-            <button className="primary" onClick={() => setEditing('new')}>
-              <Icon name="plus" size={16} /> Добавить норматив
-            </button>
-          )
-        }
-      >
-        <div className="toolbar">
-          <Segmented
-            label="Категория"
-            value={category}
-            onChange={setCategory}
-            options={[
-              ['all', 'Все'],
-              ['aup', 'АУП'],
-              ['support', 'Вспомогательный'],
-            ]}
+      <Async state={coefficients}>
+        {(items) => (
+          <SimpleNorms
+            meta={meta}
+            coefficients={items}
+            onEdit={setSimple}
+            onAdd={() => setSimple('new')}
           />
-          <select
-            value={type}
-            onChange={(e) => setType(e.target.value)}
-            aria-label="Тип учреждения"
-          >
-            <option value="">Все типы учреждений</option>
-            {meta.institution_types
-              .filter((t) => t.code !== 'all')
-              .map((t) => (
-                <option key={t.code} value={t.code}>
-                  {t.title}
-                </option>
-              ))}
-          </select>
-          <select value={group} onChange={(e) => setGroup(e.target.value)} aria-label="Группа">
-            <option value="">Все группы</option>
-            {meta.groups
-              .filter((g) => category === 'all' || g.category === category)
-              .map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.name}
-                </option>
-              ))}
-          </select>
-          <select
-            value={document}
-            onChange={(e) => setDocument(e.target.value)}
-            aria-label="Документ"
-          >
-            <option value="">Все документы</option>
-            {(documents.data ?? []).map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.doc_type} № {d.number ?? '—'}
-              </option>
-            ))}
-          </select>
-          <button
-            className={`chip ${onlyActive ? 'chip-on' : ''}`}
-            aria-pressed={onlyActive}
-            onClick={() => setOnlyActive(!onlyActive)}
-          >
-            Только действующие
-          </button>
-        </div>
-        <Async state={coefficients}>
-          {() =>
-            shown.length === 0 ? (
-              <Empty>
-                {coefficients.data?.length
-                  ? 'Под выбранные условия нормативов нет.'
-                  : 'Нормативов пока нет. Без них анализ покажет «норматив не настроен».'}
-              </Empty>
-            ) : (
-              <table className="stack">
-                <thead>
-                  <tr>
-                    <th>Группа</th>
-                    <th>Для кого</th>
-                    <th>Показатель</th>
-                    <th>Норматив</th>
-                    <th>Документ</th>
-                    <th>Действует</th>
-                    <th>Статус</th>
-                    {canEdit && <th />}
-                  </tr>
-                </thead>
-                <tbody>
-                  {shown.map((c) => (
-                    <tr key={c.id}>
-                      <td data-label="Группа">
-                        {c.group}
-                        <div className="muted">
-                          {c.category === 'aup' ? 'АУП' : 'Вспомогательный'}
-                        </div>
-                      </td>
-                      <td data-label="Для кого">
-                        {c.institution_type_title}
-                        {c.scope_title && <div className="muted">только: {c.scope_title}</div>}
-                      </td>
-                      <td data-label="Показатель">{c.metric_title}</td>
-                      <td data-label="Норматив">
-                        {c.rule}
-                        {!c.is_mandatory && <div className="muted">рекомендация</div>}
-                      </td>
-                      <td data-label="Документ" className="reason">
-                        {c.document ?? <span className="muted">не указан</span>}
-                      </td>
-                      <td data-label="Действует">{period(c)}</td>
-                      <td data-label="Статус">
-                        <Badge tone={STATE[c.state].tone}>{STATE[c.state].label}</Badge>
-                      </td>
-                      {canEdit && (
-                        <td className="row-action">
-                          {c.can_edit && <button onClick={() => setEditing(c)}>Изменить</button>}
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        )}
+      </Async>
+      <details className="more">
+        <summary>Подробно: все нормативы с округлением и сроками, документы-основания</summary>
+        <Card
+          title="Нормативы"
+          aside={
+            canEdit && (
+              <button className="primary" onClick={() => setEditing('new')}>
+                <Icon name="plus" size={16} /> Добавить норматив
+              </button>
             )
           }
-        </Async>
-      </Card>
-
-      <Card
-        title="Документы-основания"
-        aside={
-          canEdit && (
-            <button onClick={() => setEditingDoc('new')}>
-              <Icon name="plus" size={16} /> Добавить документ
+        >
+          <div className="toolbar">
+            <Segmented
+              label="Категория"
+              value={category}
+              onChange={setCategory}
+              options={[
+                ['all', 'Все'],
+                ['aup', 'АУП'],
+                ['support', 'Вспомогательный'],
+              ]}
+            />
+            <select
+              value={type}
+              onChange={(e) => setType(e.target.value)}
+              aria-label="Тип учреждения"
+            >
+              <option value="">Все типы учреждений</option>
+              {meta.institution_types
+                .filter((t) => t.code !== 'all')
+                .map((t) => (
+                  <option key={t.code} value={t.code}>
+                    {t.title}
+                  </option>
+                ))}
+            </select>
+            <select value={group} onChange={(e) => setGroup(e.target.value)} aria-label="Группа">
+              <option value="">Все группы</option>
+              {meta.groups
+                .filter((g) => category === 'all' || g.category === category)
+                .map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+            </select>
+            <select
+              value={document}
+              onChange={(e) => setDocument(e.target.value)}
+              aria-label="Документ"
+            >
+              <option value="">Все документы</option>
+              {(documents.data ?? []).map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.doc_type} № {d.number ?? '—'}
+                </option>
+              ))}
+            </select>
+            <button
+              className={`chip ${onlyActive ? 'chip-on' : ''}`}
+              aria-pressed={onlyActive}
+              onClick={() => setOnlyActive(!onlyActive)}
+            >
+              Только действующие
             </button>
-          )
-        }
-      >
-        <Async state={documents}>
-          {(items) =>
-            items.length === 0 ? (
-              <Empty>Документов пока нет.</Empty>
-            ) : (
-              <table className="stack">
-                <thead>
-                  <tr>
-                    <th>Документ</th>
-                    <th>Кто издал</th>
-                    <th>Действует</th>
-                    <th className="num">Нормативов</th>
-                    <th>Статус</th>
-                    {canEdit && <th />}
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((d) => (
-                    <tr key={d.id}>
-                      <td data-label="Документ" className="reason">
-                        {d.label}
-                        {d.source_ref && <div className="muted">{d.source_ref}</div>}
-                      </td>
-                      <td data-label="Кто издал">{d.issuer ?? '—'}</td>
-                      <td data-label="Действует">{period(d)}</td>
-                      <td data-label="Нормативов" className="num">
-                        {d.coefficients}
-                      </td>
-                      <td data-label="Статус">
-                        <Badge tone={d.status === 'active' ? 'green' : 'gray'}>
-                          {d.status_title}
-                        </Badge>
-                      </td>
-                      {canEdit && (
-                        <td className="row-action">
-                          {(meta.permissions.edit_regional_norms || d.scope_level !== 'region') && (
-                            <button onClick={() => setEditingDoc(d)}>Изменить</button>
-                          )}
-                        </td>
-                      )}
+          </div>
+          <Async state={coefficients}>
+            {() =>
+              shown.length === 0 ? (
+                <Empty>
+                  {coefficients.data?.length
+                    ? 'Под выбранные условия нормативов нет.'
+                    : 'Нормативов пока нет. Без них анализ покажет «норматив не настроен».'}
+                </Empty>
+              ) : (
+                <table className="stack">
+                  <thead>
+                    <tr>
+                      <th>Группа</th>
+                      <th>Для кого</th>
+                      <th>Показатель</th>
+                      <th>Норматив</th>
+                      <th>Документ</th>
+                      <th>Действует</th>
+                      <th>Статус</th>
+                      {canEdit && <th />}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {shown.map((c) => (
+                      <tr key={c.id}>
+                        <td data-label="Группа">
+                          {c.group}
+                          <div className="muted">
+                            {c.category === 'aup' ? 'АУП' : 'Вспомогательный'}
+                          </div>
+                        </td>
+                        <td data-label="Для кого">
+                          {c.institution_type_title}
+                          {c.scope_title && <div className="muted">только: {c.scope_title}</div>}
+                        </td>
+                        <td data-label="Показатель">{c.metric_title}</td>
+                        <td data-label="Норматив">
+                          {c.rule}
+                          {!c.is_mandatory && <div className="muted">рекомендация</div>}
+                        </td>
+                        <td data-label="Документ" className="reason">
+                          {c.document ?? <span className="muted">не указан</span>}
+                        </td>
+                        <td data-label="Действует">{period(c)}</td>
+                        <td data-label="Статус">
+                          <Badge tone={STATE[c.state].tone}>{STATE[c.state].label}</Badge>
+                        </td>
+                        {canEdit && (
+                          <td className="row-action">
+                            {c.can_edit && <button onClick={() => setEditing(c)}>Изменить</button>}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            }
+          </Async>
+        </Card>
+
+        <Card
+          title="Документы-основания"
+          aside={
+            canEdit && (
+              <button onClick={() => setEditingDoc('new')}>
+                <Icon name="plus" size={16} /> Добавить документ
+              </button>
             )
           }
-        </Async>
-      </Card>
+        >
+          <Async state={documents}>
+            {(items) =>
+              items.length === 0 ? (
+                <Empty>Документов пока нет.</Empty>
+              ) : (
+                <table className="stack">
+                  <thead>
+                    <tr>
+                      <th>Документ</th>
+                      <th>Кто издал</th>
+                      <th>Действует</th>
+                      <th className="num">Нормативов</th>
+                      <th>Статус</th>
+                      {canEdit && <th />}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((d) => (
+                      <tr key={d.id}>
+                        <td data-label="Документ" className="reason">
+                          {d.label}
+                          {d.source_ref && <div className="muted">{d.source_ref}</div>}
+                        </td>
+                        <td data-label="Кто издал">{d.issuer ?? '—'}</td>
+                        <td data-label="Действует">{period(d)}</td>
+                        <td data-label="Нормативов" className="num">
+                          {d.coefficients}
+                        </td>
+                        <td data-label="Статус">
+                          <Badge tone={d.status === 'active' ? 'green' : 'gray'}>
+                            {d.status_title}
+                          </Badge>
+                        </td>
+                        {canEdit && (
+                          <td className="row-action">
+                            {(meta.permissions.edit_regional_norms ||
+                              d.scope_level !== 'region') && (
+                              <button onClick={() => setEditingDoc(d)}>Изменить</button>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            }
+          </Async>
+        </Card>
+      </details>
 
+      {simple && (
+        <SimpleNormEditor
+          meta={meta}
+          coefficient={simple === 'new' ? null : simple}
+          onClose={() => setSimple(null)}
+          onSaved={changed}
+          onAdvanced={() => {
+            setEditing(simple)
+            setSimple(null)
+          }}
+        />
+      )}
       {editing && (
         <CoefficientEditor
           meta={meta}

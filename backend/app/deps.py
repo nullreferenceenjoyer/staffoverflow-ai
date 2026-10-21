@@ -16,7 +16,7 @@ from app.security import decode_access_token
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 # Роли, которые работают в пределах одного учреждения
-ORG_ROLES = (Role.director, Role.executor, Role.employee)
+ORG_ROLES = (Role.director, Role.executor, Role.employee, Role.cleaner)
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:

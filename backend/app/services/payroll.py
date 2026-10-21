@@ -25,11 +25,12 @@ from app.models import (
     StaffingScheduleVersion,
     User,
 )
-from app.services import staffing, staffing_analysis
+from app.services import staffing, staffing_analysis, workload
 from app.services.norms import CENT, ZERO, dec, num
 
 MONTHS = 12
-SOURCES = {"manual": "вручную", "import": "загрузка из файла", "demo": "демо-данные"}
+SOURCES = {"manual": "вручную", "import": "загрузка из файла", "demo": "демо-данные",
+           "dismissal": "увольнение по приказу"}
 STATUSES = {"approved": "утверждена", "draft": "черновик", "archived": "в архиве"}
 
 
@@ -297,6 +298,10 @@ def institution(db: Session, org: Organization, year: str, basis: str) -> dict:
     fallback = average_salaries(_schedules(db, [o.id for o in db.scalars(
         select(Organization).where(Organization.municipality_id == org.municipality_id))],
         year))
+    # Сколько уборщиков и сотрудников хозотдела заведено в системе — сверка с «занято»
+    registered = workload.people_by_org(db, [org.id]).get(org.id, {})
+    people_of = {"support_cleaning": registered.get("cleaner"),
+                 workload.MAINTENANCE_GROUP: registered.get("executor")}
 
     lines = []
     for group in [*groups, *extra]:
@@ -320,7 +325,17 @@ def institution(db: Session, org: Organization, year: str, basis: str) -> dict:
             "deviation": _f(deviation),
             "deviation_cost": _f(annual(deviation, price)),
             "status": row.status if row else None,
+            "people": people_of.get(group.code),
         })
+    # Должности группы и вывод по ней: сократить, убрать вакансии, добавить ставку
+    from app.services import recommend  # noqa: PLC0415 — recommend импортирует этот модуль
+
+    advice = recommend.build(db, [org], year, territory=False)
+    decided = {g["group_id"]: g for g in advice["orgs"][org.id]["groups"]}
+    for line in lines:
+        found = decided.get(line["group_id"])
+        line["positions"] = found["lines"] if found else []
+        line["advice"] = ({k: v for k, v in found.items() if k != "lines"} if found else None)
     by_category = {}
     for category in staffing_analysis.CATEGORIES:
         part = {gid: it for gid, it in items.items()
@@ -335,6 +350,13 @@ def institution(db: Session, org: Organization, year: str, basis: str) -> dict:
             "comment": schedule.comment},
         "lines": lines, "totals": totals_of(items).out(), "by_category": by_category,
         "history": history(db, org.id, year),
+        "advice_totals": advice["orgs"][org.id]["totals"],
+        "rules": advice["rules"],
+        # Куда можно добавить должность: группы учреждения и их типовые должности
+        "groups": [{"id": g.id, "name": g.name, "category": g.top_category,
+                    "suggestions": [p.strip()[:1].upper() + p.strip()[1:]
+                                    for p in (g.positions or "").split(",") if p.strip()]}
+                   for g in groups],
     }
 
 
@@ -349,15 +371,19 @@ def _last_change(versions: list, names: dict[int, str]) -> dict | None:
 
 def territory(db: Session, orgs: list[Organization], year: str) -> dict:
     """Строка на учреждение: штатка, занятость, ФОТ и последнее изменение."""
+    from app.services import recommend  # noqa: PLC0415 — recommend импортирует этот модуль
+
     ids = [o.id for o in orgs]
     schedules = _schedules(db, ids, year)
     versions = versions_of(db, ids, year)
     names = group_names(db)
+    advice = recommend.build(db, orgs, year)["orgs"]
     items, overall = [], Totals(payroll_approved=ZERO, payroll_occupied=ZERO)
     for org in orgs:
         schedule = schedules.get(org.id)
         total = totals_of(items_of(schedule))
         last = _last_change(versions.get(org.id, []), names)
+        decided = advice[org.id]["totals"]
         items.append({
             "organization_id": org.id, "organization": org.name, "org_type": org.org_type,
             "municipality": org.municipality.name,
@@ -368,6 +394,11 @@ def territory(db: Session, orgs: list[Organization], year: str) -> dict:
             "staffed_pct": (None if total.occupied is None or not total.approved
                             else round(float(total.occupied / total.approved * 100), 1)),
             "last_change": last,
+            "cut": decided["cut"], "cut_vacant": decided["cut_vacant"],
+            "reduce_load": decided["reduce_load"],
+            "cut_cost": decided["cost"] + decided["cost_vacant"] + decided["cost_load"],
+            "hire": decided["hire"],
+            "positions": sum(len(s.lines) for s in [schedule] if s is not None),
         })
         if schedule is not None:
             overall.approved += total.approved

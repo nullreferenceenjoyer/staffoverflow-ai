@@ -3,11 +3,67 @@ import { useMemo, useState } from 'react'
 import { api, Municipality, Organization, Role, User } from '../../api'
 import { ImportDialog } from '../../components/ImportDialog'
 import { Icon } from '../../components/icons'
-import { Async, Badge, Card, Empty, Field, Form, Modal } from '../../components/ui'
+import { Async, Badge, Card, Empty, Field, Form, Modal, Segmented } from '../../components/ui'
 import { fmtDateTime, ROLE_LABELS, useApi } from '../../lib'
 
 // Роли, которые работают в пределах одного учреждения
-const ORG_ROLES: Role[] = ['director', 'executor', 'employee']
+const ORG_ROLES: Role[] = ['director', 'executor', 'employee', 'cleaner']
+
+// Для администратора людей три вида, у сотрудника выбирается группа
+type Kind = 'employee' | 'director' | 'admin'
+type Group = 'regular' | 'cleaner' | 'maintenance' | 'department' | 'observer'
+type Where = 'org' | 'brigade'
+
+const KINDS: [Kind, string][] = [
+  ['employee', 'Сотрудник'],
+  ['director', 'Директор'],
+  ['admin', 'Администратор'],
+]
+const GROUPS: [Group, string][] = [
+  ['regular', 'Обычный сотрудник'],
+  ['cleaner', 'Уборщик'],
+  ['maintenance', 'Хозяйственный отдел'],
+  ['department', 'Сотрудник управления образования'],
+  ['observer', 'Только просмотр (наблюдатель)'],
+]
+
+function splitRole(role: Role): { kind: Kind; group: Group; where: Where } {
+  const base = { kind: 'employee' as Kind, group: 'regular' as Group, where: 'org' as Where }
+  if (role === 'admin' || role === 'director') return { ...base, kind: role }
+  if (role === 'cleaner') return { ...base, group: 'cleaner' }
+  if (role === 'executor') return { ...base, group: 'maintenance' }
+  if (role === 'brigade') return { ...base, group: 'maintenance', where: 'brigade' }
+  if (role === 'municipal_specialist' || role === 'regional_analyst')
+    return { ...base, group: 'department' }
+  if (role === 'observer') return { ...base, group: 'observer' }
+  return base
+}
+
+function joinRole(kind: Kind, group: Group, where: Where, municipality: number | null): Role {
+  if (kind !== 'employee') return kind
+  if (group === 'cleaner') return 'cleaner'
+  if (group === 'maintenance') return where === 'brigade' ? 'brigade' : 'executor'
+  if (group === 'department') return municipality ? 'municipal_specialist' : 'regional_analyst'
+  if (group === 'observer') return 'observer'
+  return 'employee'
+}
+
+const ROLE_HINTS: Record<Role, string> = {
+  employee: 'Подаёт заявки и видит только свои.',
+  cleaner:
+    'Получает заявки по уборке своего учреждения. Учитывается в анализе: сколько уборщиков лишних по нормативу.',
+  executor:
+    'Делает простую хозяйственную работу своего учреждения. По его загрузке заявками видно, нужен ли он.',
+  brigade:
+    'Ездит по учреждениям, закреплённым за бригадой («Хозяйственные работы»). Загрузка бригады считается по часам работы, дороге и числу заявок.',
+  municipal_specialist:
+    'Видит заявки и штатку всех учреждений своего муниципалитета, меняет исполнителей и бригады у заявок.',
+  regional_analyst:
+    'Без муниципалитета — видит все учреждения: заявки, штатку, нормативы. Меняет исполнителей и бригады у заявок.',
+  director: 'Видит своё учреждение: заявки, штатку, сколько ставок лишних.',
+  admin: 'Видит всё, ведёт пользователей, учреждения и хозяйственные работы.',
+  observer: 'Видит сводку по округу, ничего не меняет.',
+}
 
 interface AuditRow {
   id: number
@@ -26,7 +82,7 @@ export interface Directory {
   brigades: { id: number; name: string }[]
 }
 
-/** Где работает пользователь: учреждение, муниципалитет или весь регион. */
+/** Где работает пользователь: учреждение, муниципалитет или весь округ. */
 function placeOf(user: User, directory: Directory) {
   if (user.organization_id) {
     return directory.organizations.find((o) => o.id === user.organization_id)?.name ?? '—'
@@ -38,7 +94,7 @@ function placeOf(user: User, directory: Directory) {
     const name = directory.brigades.find((b) => b.id === user.brigade_id)?.name
     return name ? `Бригада «${name}»` : '—'
   }
-  return ['admin', 'regional_analyst', 'observer'].includes(user.role) ? 'Весь регион' : '—'
+  return ['admin', 'regional_analyst', 'observer'].includes(user.role) ? 'Весь округ' : '—'
 }
 
 /**
@@ -119,11 +175,14 @@ function UserEditor({
   onClose: () => void
   onSaved: () => void
 }) {
+  const initial = splitRole(user?.role ?? 'employee')
+  const [kind, setKind] = useState<Kind>(initial.kind)
+  const [group, setGroup] = useState<Group>(initial.group)
+  const [where, setWhere] = useState<Where>(initial.where)
   const [draft, setDraft] = useState({
     email: user?.email ?? '',
     full_name: user?.full_name ?? '',
     password: '',
-    role: (user?.role ?? 'employee') as Role,
     municipality_id: user?.municipality_id ?? null,
     organization_id: user?.organization_id ?? null,
     brigade_id: user?.brigade_id ?? null,
@@ -131,14 +190,16 @@ function UserEditor({
   })
   const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) =>
     setDraft({ ...draft, [key]: value })
+  const role = joinRole(kind, group, where, draft.municipality_id)
 
   async function save() {
     // Привязка к территории нужна только тем ролям, у которых она ограничивает доступ
     const body = {
       ...draft,
-      municipality_id: draft.role === 'municipal_specialist' ? draft.municipality_id : null,
-      organization_id: ORG_ROLES.includes(draft.role) ? draft.organization_id : null,
-      brigade_id: draft.role === 'brigade' ? draft.brigade_id : null,
+      role,
+      municipality_id: role === 'municipal_specialist' ? draft.municipality_id : null,
+      organization_id: ORG_ROLES.includes(role) ? draft.organization_id : null,
+      brigade_id: role === 'brigade' ? draft.brigade_id : null,
     }
     if (user) {
       const { email: _email, password, ...rest } = body
@@ -184,25 +245,44 @@ function UserEditor({
             autoComplete="new-password"
           />
         </Field>
-        <Field label="Роль">
-          <select value={draft.role} onChange={(e) => set('role', e.target.value as Role)}>
-            {Object.entries(ROLE_LABELS).map(([role, label]) => (
-              <option key={role} value={role}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {draft.role === 'municipal_specialist' && (
+        <div className="field">
+          <span>Роль</span>
+          <Segmented label="Роль" options={KINDS} value={kind} onChange={setKind} />
+        </div>
+        {kind === 'employee' && (
+          <Field label="Группа сотрудника">
+            <select value={group} onChange={(e) => setGroup(e.target.value as Group)}>
+              {GROUPS.map(([code, title]) => (
+                <option key={code} value={code}>
+                  {title}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {kind === 'employee' && group === 'maintenance' && (
+          <div className="field">
+            <span>Где работает</span>
+            <Segmented
+              label="Где работает"
+              options={[
+                ['org', 'В учреждении'],
+                ['brigade', 'В бригаде управления образования'],
+              ]}
+              value={where}
+              onChange={setWhere}
+            />
+          </div>
+        )}
+        {(role === 'municipal_specialist' || role === 'regional_analyst') && (
           <Field label="Муниципалитет">
             <select
               value={draft.municipality_id ?? ''}
               onChange={(e) =>
                 set('municipality_id', e.target.value ? Number(e.target.value) : null)
               }
-              required
             >
-              <option value="">Выберите…</option>
+              <option value="">Весь округ</option>
               {directory.municipalities.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
@@ -211,7 +291,7 @@ function UserEditor({
             </select>
           </Field>
         )}
-        {ORG_ROLES.includes(draft.role) && (
+        {ORG_ROLES.includes(role) && (
           <Field label="Учреждение">
             <OrganizationPicker
               directory={directory}
@@ -220,7 +300,7 @@ function UserEditor({
             />
           </Field>
         )}
-        {draft.role === 'brigade' && (
+        {role === 'brigade' && (
           <Field label="Бригада">
             <select
               value={draft.brigade_id ?? ''}
@@ -237,15 +317,7 @@ function UserEditor({
           </Field>
         )}
         <p className="muted">
-          {draft.role === 'brigade'
-            ? 'Участник видит заявки, направленные его бригаде, по всем закреплённым за ней учреждениям.'
-            : draft.role === 'executor'
-              ? 'Сотрудник на точке получает простую хозяйственную работу своего учреждения.'
-              : ORG_ROLES.includes(draft.role)
-                ? 'Пользователь увидит заявки только этого учреждения.'
-                : draft.role === 'municipal_specialist'
-                  ? 'Специалист видит заявки всех учреждений своего муниципалитета.'
-                  : 'Эта роль видит заявки всего региона.'}
+          <strong>{ROLE_LABELS[role]}.</strong> {ROLE_HINTS[role]}
         </p>
         {user && (
           <label className="check">

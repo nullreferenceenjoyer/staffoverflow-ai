@@ -13,9 +13,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.deps import Scope, audit, get_scope
-from app.models import Municipality, Organization, PersonnelGroup, Role
-from app.schemas import RecalculateIn, StaffingDataIn, StaffingRequestIn
-from app.services import helpdesk, norms, payroll, staffing, staffing_analysis
+from app.models import Municipality, Organization, PersonnelGroup, Role, StaffingLine
+from app.schemas import (
+    PositionIn,
+    RecalculateIn,
+    StaffingDataIn,
+    StaffingRequestIn,
+    WorkloadSettingsIn,
+)
+from app.services import (
+    app_settings,
+    cleaning,
+    helpdesk,
+    norms,
+    payroll,
+    staffing,
+    staffing_analysis,
+    summary,
+    workload,
+)
 from app.services.spreadsheet import TableError, build_template, read_table
 from app.services.staffing_analysis import (
     BASIS_TITLES,
@@ -80,7 +96,10 @@ def meta(scope: Scope = Depends(viewer)):
                     if user.role == Role.director and user.organization_id else None)
     groups = db.scalars(select(PersonnelGroup).order_by(PersonnelGroup.sort_order,
                                                         PersonnelGroup.id)).all()
+    every = db.scalars(select(Municipality.name).order_by(Municipality.id)).all()
     return {
+        # Система работает в одном округе — его название показывается вместо «регион»
+        "okrug": every[0] if len(every) == 1 else None,
         "years": years, "current_year": this_year,
         "categories": [{"code": k, "title": v} for k, v in CATEGORY_TITLES.items()],
         "bases": [{"code": k, "title": v} for k, v in BASIS_TITLES.items()],
@@ -102,6 +121,7 @@ def meta(scope: Scope = Depends(viewer)):
             "edit_regional_norms": user.role in (Role.admin, Role.regional_analyst),
             "import": user.role in staffing.IMPORT_ROLES,
             "import_norms": user.role in (Role.admin, Role.regional_analyst),
+            "edit_workload": user.role in staffing.NORM_ROLES,
         },
     }
 
@@ -207,7 +227,7 @@ def save_institution_data(org_id: int, body: StaffingDataIn, request: Request,
     current = staffing.org_data(db, org, year)
     known = {line["id"] for line in current["lines"]}
     values = {}
-    for line in body.lines:
+    for line in body.lines or []:
         if line.group_id not in allowed and line.group_id not in known:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Группа не применяется к этому учреждению")
@@ -219,10 +239,13 @@ def save_institution_data(org_id: int, body: StaffingDataIn, request: Request,
         "students_count": body.students_count, "classes_count": body.classes_count,
         "groups_count": body.groups_count,
         "total_area_m2": None if body.total_area_m2 is None else round(body.total_area_m2, 1),
+        "rooms_count": body.rooms_count,
     })
     schedule = staffing.get_schedule(db, org, year)
     previous_status = schedule.status
-    count = staffing.set_lines(schedule, values, replace_all=True)
+    # Без строк форма меняет только показатели и статус: должности правятся по одной
+    count = (staffing.set_lines(schedule, values, replace_all=True) if body.lines is not None
+             else len(schedule.lines))
     staffing.set_status(schedule, body.status)
     schedule.comment = body.comment or None
     db.flush()
@@ -256,6 +279,184 @@ def recalculate(body: RecalculateIn, request: Request, scope: Scope = Depends(vi
           request=request)
     scope.db.commit()
     return {"organizations": count}
+
+
+def _position_saved(scope: Scope, org: Organization, schedule, year: str, action: str,
+                    comment: str, details: dict, request: Request) -> dict:
+    db = scope.db
+    db.flush()
+    payroll.snapshot(db, schedule, scope.user, "manual", comment=comment)
+    staffing_analysis.recalculate(db, year, [org.id])
+    audit(db, scope.user, action, entity="organization", entity_id=org.id,
+          details={"year": year, **details}, request=request)
+    db.commit()
+    return payroll.institution(db, org, year, "occupied")
+
+
+def _group_for(scope: Scope, org: Organization, group_id: int) -> PersonnelGroup:
+    group = scope.db.get(PersonnelGroup, group_id)
+    if group is None or not staffing_analysis.group_applies(group, org):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Эта группа должностей не применяется к учреждению")
+    return group
+
+
+@router.post("/institutions/{org_id}/positions", status_code=status.HTTP_201_CREATED)
+def add_position(org_id: int, body: PositionIn, request: Request,
+                 scope: Scope = Depends(viewer)):
+    """Добавить должность в штатку."""
+    _editor(scope)
+    year = _year(body.year)
+    org = scope.get_org(org_id)
+    group = _group_for(scope, org, body.group_id)
+    schedule = staffing.get_schedule(scope.db, org, year)
+    if any((line.position or staffing.default_position(group)).lower() == body.position.lower()
+           and line.personnel_group_id == group.id for line in schedule.lines):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Такая должность в штатке уже есть — "
+                                                      "измените её ставки")
+    schedule.lines.append(StaffingLine(
+        personnel_group_id=group.id, position=body.position,
+        approved_fte=norms.dec(body.approved_fte), occupied_fte=norms.dec(body.occupied_fte),
+        salary_rub=norms.dec(body.salary_rub)))
+    return _position_saved(scope, org, schedule, year, "staffing_position_added",
+                           f"Добавлена должность: {body.position}",
+                           {"position": body.position, "approved_fte": body.approved_fte},
+                           request)
+
+
+def _line(scope: Scope, org: Organization, year: str, line_id: int):
+    schedule = staffing.get_schedule(scope.db, org, year)
+    line = next((x for x in schedule.lines if x.id == line_id), None)
+    if line is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Такой должности в штатке нет")
+    return schedule, line
+
+
+@router.put("/institutions/{org_id}/positions/{line_id}")
+def update_position(org_id: int, line_id: int, body: PositionIn, request: Request,
+                    scope: Scope = Depends(viewer)):
+    """Изменить должность: название, группу, ставки, занятость, оклад."""
+    _editor(scope)
+    year = _year(body.year)
+    org = scope.get_org(org_id)
+    group = _group_for(scope, org, body.group_id)
+    schedule, line = _line(scope, org, year, line_id)
+    before = (line.position, float(line.approved_fte),
+              None if line.occupied_fte is None else float(line.occupied_fte))
+    line.personnel_group_id = group.id
+    line.position = body.position
+    line.approved_fte = norms.dec(body.approved_fte)
+    line.occupied_fte = norms.dec(body.occupied_fte)
+    line.salary_rub = norms.dec(body.salary_rub)
+    return _position_saved(scope, org, schedule, year, "staffing_position_updated",
+                           f"Изменена должность: {body.position}",
+                           {"line_id": line_id, "before": before,
+                            "after": [body.position, body.approved_fte, body.occupied_fte]},
+                           request)
+
+
+@router.delete("/institutions/{org_id}/positions/{line_id}")
+def delete_position(org_id: int, line_id: int, request: Request, year: str | None = None,
+                    scope: Scope = Depends(viewer)):
+    """Убрать должность из штатки: такой должности в учреждении нет."""
+    _editor(scope)
+    year = _year(year)
+    org = scope.get_org(org_id)
+    schedule, line = _line(scope, org, year, line_id)
+    name = staffing.position_name(line, scope.db.get(PersonnelGroup, line.personnel_group_id))
+    removed = float(line.approved_fte or 0)
+    schedule.lines.remove(line)
+    return _position_saved(scope, org, schedule, year, "staffing_position_deleted",
+                           f"Удалена должность: {name}",
+                           {"line_id": line_id, "position": name, "approved_fte": removed},
+                           request)
+
+
+@router.delete("/institutions/{org_id}/lines/{group_id}")
+def delete_line(org_id: int, group_id: int, request: Request, year: str | None = None,
+                scope: Scope = Depends(viewer)):
+    """Убрать должность из штатки: такой должности в учреждении нет."""
+    _editor(scope)
+    year = _year(year)
+    org = scope.get_org(org_id)
+    db = scope.db
+    schedule = staffing.get_schedule(db, org, year)
+    before = [line for line in schedule.lines if line.personnel_group_id == group_id]
+    if not before:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Такой должности в штатке нет")
+    removed = sum(float(line.approved_fte or 0) for line in before)
+    schedule.lines[:] = [line for line in schedule.lines if line.personnel_group_id != group_id]
+    db.flush()
+    group = db.get(PersonnelGroup, group_id)
+    payroll.snapshot(db, schedule, scope.user, "manual",
+                     comment=f"Удалена должность: {group.name if group else group_id}")
+    staffing_analysis.recalculate(db, year, [org.id])
+    audit(db, scope.user, "staffing_line_deleted", entity="organization", entity_id=org.id,
+          details={"year": year, "group_id": group_id, "approved_fte": removed},
+          request=request)
+    db.commit()
+    return payroll.institution(db, org, year, "occupied")
+
+
+# --- итог и загрузка хозслужбы -------------------------------------------------------
+
+
+def _days(days: int) -> int:
+    return days if days in workload.PERIODS else 90
+
+
+@router.get("/cleaning")
+def cleaning_view(year: str | None = None, days: int = 90, municipality_id: int | None = None,
+                  scope: Scope = Depends(viewer)):
+    """Уборщики: норматив по кабинетам и площади, сколько есть, сколько на одного."""
+    _details(scope)
+    orgs = _orgs(scope, municipality_id)
+    return cleaning.build(scope.db, orgs, _year(year), _days(days),
+                          territory=scope.user.role != Role.director)
+
+
+@router.get("/summary")
+def summary_view(year: str | None = None, days: int = 90,
+                 municipality_id: int | None = None, scope: Scope = Depends(viewer)):
+    """Сколько ставок можно сократить и какие должности: по нормативу, вакансиям и загрузке."""
+    orgs = _orgs(scope, municipality_id)
+    data = summary.build(scope.db, orgs, _year(year), _days(days),
+                         territory=scope.user.role != Role.director)
+    data["organization"] = (
+        {"id": orgs[0].id, "name": orgs[0].name}
+        if scope.user.role == Role.director and orgs else None)
+    if scope.user.role == Role.observer:
+        # Наблюдателю — обезличенная сводка: без фамилий
+        for unit in [*data["brigades"], *data["onsite"]]:
+            unit["members"], unit["candidates"] = [], []
+    return data
+
+
+@router.get("/workload")
+def workload_view(days: int = 90, municipality_id: int | None = None,
+                  scope: Scope = Depends(viewer)):
+    """Загрузка бригад и хозотделов: часы работы, дорога, заявки, сколько людей нужно."""
+    _details(scope)
+    orgs = _orgs(scope, municipality_id)
+    data = workload.analyze(scope.db, orgs, _days(days),
+                            territory=scope.user.role != Role.director)
+    data["titles"] = app_settings.WORKLOAD_TITLES
+    data["can_edit"] = scope.user.role in staffing.NORM_ROLES
+    return data
+
+
+@router.put("/workload/settings")
+def save_workload_settings(body: WorkloadSettingsIn, request: Request,
+                           scope: Scope = Depends(viewer)):
+    if scope.user.role not in staffing.NORM_ROLES:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нормы загрузки меняет управление "
+                                                       "образования или администратор")
+    before = app_settings.workload(scope.db)
+    saved = app_settings.save_workload(scope.db, body.model_dump())
+    audit(scope.db, scope.user, "workload_settings_saved",
+          details={"before": before, "after": saved}, request=request)
+    scope.db.commit()
+    return saved
 
 
 # --- дашборд, штатка и факт ----------------------------------------------------------

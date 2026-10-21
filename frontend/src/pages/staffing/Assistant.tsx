@@ -34,7 +34,7 @@ function inline(text: string): ReactNode[] {
 }
 
 /** Ответ модели: абзацы и списки «- …» / «1. …». */
-function Formatted({ text }: { text: string }) {
+export function Formatted({ text }: { text: string }) {
   const blocks: ReactNode[] = []
   let list: { ordered: boolean; items: string[] } | null = null
   const flush = () => {

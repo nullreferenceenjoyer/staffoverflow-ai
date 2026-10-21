@@ -1,4 +1,12 @@
-import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
+import {
+  CSSProperties,
+  FormEvent,
+  ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { createPortal } from 'react-dom'
 
 import { Icon, IconName } from './icons'
@@ -21,7 +29,7 @@ export function Page({
           <h1>{title}</h1>
           {hint && <p className="hint">{hint}</p>}
         </div>
-        {actions && <div className="actions wrap">{actions}</div>}
+        {actions && <div className="actions page-actions">{actions}</div>}
       </header>
       {children}
     </div>
@@ -159,6 +167,37 @@ export function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>
 }
 
+/**
+ * Подложка под выбранным пунктом, которая плавно переезжает к новому: меряем кнопку
+ * и двигаем подложку, а не перекрашиваем кнопки.
+ */
+function useSlider(value: string) {
+  const box = useRef<HTMLDivElement>(null)
+  const [style, setStyle] = useState<CSSProperties>({ opacity: 0 })
+  useLayoutEffect(() => {
+    const place = () => {
+      const active = box.current?.querySelector<HTMLElement>('[data-active="true"]')
+      if (!active) return setStyle({ opacity: 0 })
+      setStyle({
+        width: active.offsetWidth,
+        height: active.offsetHeight,
+        transform: `translate(${active.offsetLeft}px, ${active.offsetTop}px)`,
+      })
+    }
+    place()
+    const observer = new ResizeObserver(place)
+    if (box.current) observer.observe(box.current)
+    return () => observer.disconnect()
+  }, [value])
+  useEffect(() => {
+    // На телефоне вкладки листаются — выбранная не должна прятаться за краем
+    box.current
+      ?.querySelector<HTMLElement>('[data-active="true"]')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
+  }, [value])
+  return { box, style }
+}
+
 export function Tabs<T extends string>({
   tabs,
   value,
@@ -168,13 +207,16 @@ export function Tabs<T extends string>({
   value: T
   onChange: (tab: T) => void
 }) {
+  const { box, style } = useSlider(value)
   return (
-    <div className="tabs" role="tablist">
+    <div className="tabs" role="tablist" ref={box}>
+      <span className="slider" style={style} aria-hidden="true" />
       {tabs.map(([key, label]) => (
         <button
           key={key}
           role="tab"
           aria-selected={key === value}
+          data-active={key === value}
           className={key === value ? 'active' : ''}
           onClick={() => onChange(key)}
         >
@@ -197,19 +239,31 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void
   label: string
 }) {
+  const { box, style } = useSlider(value)
   return (
-    <div className="seg" role="group" aria-label={label}>
+    <div className="seg" role="group" aria-label={label} ref={box}>
+      <span className="slider" style={style} aria-hidden="true" />
       {options.map(([key, title]) => (
         <button
           key={key}
           type="button"
           aria-pressed={key === value}
+          data-active={key === value}
           className={key === value ? 'active' : ''}
           onClick={() => onChange(key)}
         >
           {title}
         </button>
       ))}
+    </div>
+  )
+}
+
+/** Содержимое вкладки: при смене ключа мягко проявляется заново. */
+export function Reveal({ id, children }: { id: string; children: ReactNode }) {
+  return (
+    <div key={id} className="reveal">
+      {children}
     </div>
   )
 }

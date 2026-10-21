@@ -112,13 +112,17 @@ def test_manager_corrects_estimate_and_hands_over_to_brigade(client, login):
     assert (corrected["complexity"], corrected["effort_by"]) == ("complex", "manual")
     assert corrected["due_at"] > body["due_at"]
 
-    details = client.get(url, headers=director).json()
+    # Передать бригаде может только управление образования
+    municipal = login(MUNICIPAL)
+    details = client.get(url, headers=municipal).json()
     serving = [b for b in details["brigades"] if b["serves"]]
     assert serving
-    moved = client.patch(url, headers=director, json={"brigade_id": serving[0]["id"]}).json()
+    assert client.patch(url, headers=director,
+                        json={"brigade_id": serving[0]["id"]}).status_code == 403
+    moved = client.patch(url, headers=municipal, json={"brigade_id": serving[0]["id"]}).json()
     assert moved["brigade"]["id"] == serving[0]["id"]
     assert moved["assignee"] is None
-    assert client.patch(url, headers=director, json={"brigade_id": 999_999}).status_code == 422
+    assert client.patch(url, headers=municipal, json={"brigade_id": 999_999}).status_code == 422
 
 
 def test_organization_without_staff_on_site_is_served_by_brigade(client, login):

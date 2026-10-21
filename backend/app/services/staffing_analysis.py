@@ -48,7 +48,8 @@ STATUS_TITLES = {
     A.deficit: "Дефицит", A.surplus: "Сверх норматива", A.normal: "Норма",
     A.no_data: "Нет данных", A.warning: "Требует проверки",
 }
-METRIC_FIELDS = ("students_count", "classes_count", "groups_count", "total_area_m2")
+METRIC_FIELDS = ("students_count", "classes_count", "groups_count", "total_area_m2",
+                 "rooms_count")
 PROBLEMS = (A.deficit, A.surplus, A.warning, A.no_data)
 SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, None: 0}
 
@@ -239,7 +240,8 @@ def _total_row(org, category: str, basis: str, groups: list[Row], problem: str |
 def analyze(org, groups: list, coefficients: list, schedule, metrics_row, year: str,
             moment: date) -> list[Row]:
     """Все строки анализа одного учреждения: по обеим основам и категориям."""
-    metrics = {key: getattr(metrics_row, key) if metrics_row else None for key in METRIC_FIELDS}
+    metrics = {key: getattr(metrics_row, key, None) if metrics_row else None
+               for key in METRIC_FIELDS}
     snapshot = {key: None if value is None else float(value) for key, value in metrics.items()}
     snapshot["confirmed_at"] = (metrics_row.confirmed_at.isoformat()
                                 if metrics_row and metrics_row.confirmed_at else None)

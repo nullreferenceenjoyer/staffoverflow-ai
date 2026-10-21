@@ -89,7 +89,7 @@ function BrigadeEditor({
                 set('municipality_id', e.target.value ? Number(e.target.value) : null)
               }
             >
-              <option value="">Весь регион</option>
+              <option value="">Весь округ</option>
               {municipalities.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
@@ -147,8 +147,8 @@ function BrigadeEditor({
           <span>Состав</span>
           {crew.length === 0 ? (
             <span className="muted">
-              Пользователей с ролью «Выездная бригада» пока нет — заведите их во вкладке
-              «Пользователи».
+              Участников бригад пока нет — заведите их во вкладке «Пользователи»: роль «Сотрудник»,
+              группа «Хозяйственный отдел», «В бригаде управления образования».
             </span>
           ) : (
             <div className="check-grid">
@@ -344,6 +344,89 @@ function SchoolsEditor({
   )
 }
 
+/** Хозотделы и уборщики учреждений: кто работает на месте, по школам. */
+export function OnSiteStaff({
+  users,
+  directory,
+}: {
+  users: User[]
+  directory: { organizations: { id: number; name: string }[] }
+}) {
+  const [search, setSearch] = useState('')
+  const byOrg = useMemo(() => {
+    const needle = search.trim().toLowerCase()
+    const map = new Map<number, { executors: User[]; cleaners: User[] }>()
+    for (const u of users) {
+      if (!u.organization_id || (u.role !== 'executor' && u.role !== 'cleaner')) continue
+      const slot = map.get(u.organization_id) ?? { executors: [], cleaners: [] }
+      ;(u.role === 'executor' ? slot.executors : slot.cleaners).push(u)
+      map.set(u.organization_id, slot)
+    }
+    const name = (id: number) => directory.organizations.find((o) => o.id === id)?.name ?? '—'
+    return [...map.entries()]
+      .map(([id, slot]) => ({ id, name: name(id), ...slot }))
+      .filter((o) => !needle || o.name.toLowerCase().includes(needle))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [users, directory, search])
+
+  const names = (list: User[]) =>
+    list.length ? (
+      list.map((u) => (
+        <span key={u.id} className={u.is_active ? '' : 'muted'}>
+          {u.full_name}
+          {u.is_active ? '' : ' (отключён)'}
+        </span>
+      ))
+    ) : (
+      <span className="muted">нет</span>
+    )
+
+  return (
+    <Card title="Хозяйственный отдел и уборщики в учреждениях">
+      <p className="muted">
+        Сотрудники, которые работают в одном учреждении. Заводятся во вкладке «Пользователи»: роль
+        «Сотрудник», группа «Хозяйственный отдел» (в учреждении) или «Уборщик».
+      </p>
+      <div className="toolbar">
+        <input
+          type="search"
+          placeholder="Поиск учреждения"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+      {byOrg.length === 0 ? (
+        <Empty>Сотрудников хозотдела и уборщиков пока нет.</Empty>
+      ) : (
+        <table className="stack">
+          <thead>
+            <tr>
+              <th>Учреждение</th>
+              <th>Хозяйственный отдел</th>
+              <th>Уборщики</th>
+            </tr>
+          </thead>
+          <tbody>
+            {byOrg.map((o) => (
+              <tr key={o.id}>
+                <td data-label="Учреждение">
+                  <strong>{o.name}</strong>
+                </td>
+                <td data-label="Хозяйственный отдел" className="name-list">
+                  {names(o.executors)}
+                </td>
+                <td data-label="Уборщики" className="name-list">
+                  {names(o.cleaners)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  )
+}
+
 export function Brigades({
   municipalities,
   topics,
@@ -367,7 +450,7 @@ export function Brigades({
 
   return (
     <Card
-      title="Выездные бригады"
+      title="Бригады и мастера управления образования"
       aside={
         <button className="primary" onClick={() => setEditing('new')}>
           Добавить
@@ -375,9 +458,11 @@ export function Brigades({
       }
     >
       <p className="muted">
-        Бригада ездит по закреплённым за ней учреждениям и берёт сложную работу, которая не по силам
-        сотруднику на точке. Если один мастер обслуживает несколько соседних школ, заведите его как
-        бригаду из одного человека.
+        Бригада ездит по закреплённым за ней школам и берёт работу, которая не по силам хозотделу
+        учреждения. Если один мастер обслуживает несколько соседних школ, заведите его как бригаду
+        из одного человека. Заявку система отдаёт той бригаде, которая быстрее доберётся:
+        учитываются очередь в часах и расстояние от базы. Сколько людей в бригаде лишние — во
+        вкладке «Хозслужба» раздела «Штатка и нормативы».
       </p>
       <Async state={state}>
         {(brigades) =>
@@ -396,7 +481,7 @@ export function Brigades({
                   <dl className="facts">
                     <dt>Где</dt>
                     <dd>
-                      {b.municipality ?? 'Весь регион'}
+                      {b.municipality ?? 'Весь округ'}
                       {b.base_address && <div className="muted">База: {b.base_address}</div>}
                     </dd>
                     <dt>Заявки</dt>

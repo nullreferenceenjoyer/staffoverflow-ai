@@ -24,6 +24,7 @@ METRICS: dict[str, str] = {
     "classes_count": "Классы",
     "groups_count": "Группы",
     "total_area_m2": "Площадь, м²",
+    "rooms_count": "Кабинеты (помещения для уборки)",
     "none": "Без показателя",
 }
 # Как показатель звучит в фразе «не указано …» — для причины «нет данных»
@@ -32,6 +33,7 @@ METRIC_MISSING: dict[str, str] = {
     "classes_count": "число классов",
     "groups_count": "число групп",
     "total_area_m2": "общая площадь помещений",
+    "rooms_count": "число кабинетов",
 }
 # В условии норматива: «1,25 ставки при числе обучающихся от 801»
 METRIC_CONDITION: dict[str, str] = {
@@ -39,6 +41,7 @@ METRIC_CONDITION: dict[str, str] = {
     "classes_count": "числе классов",
     "groups_count": "числе групп",
     "total_area_m2": "площади (м²)",
+    "rooms_count": "числе кабинетов",
 }
 INSTITUTION_TYPES: dict[str, str] = {
     "all": "Все учреждения",
@@ -101,6 +104,7 @@ def _unit_text(metric: str, size: Decimal) -> str:
         "students_count": ("обучающегося", "обучающихся", "обучающихся"),
         "classes_count": ("класс", "класса", "классов"),
         "groups_count": ("группу", "группы", "групп"),
+        "rooms_count": ("кабинет", "кабинета", "кабинетов"),
     }
     if metric == "total_area_m2":
         return f"на {num(size)} м²"
@@ -113,6 +117,7 @@ def metric_value_text(metric: str, value) -> str:
         "students_count": ("обучающийся", "обучающихся", "обучающихся"),
         "classes_count": ("класс", "класса", "классов"),
         "groups_count": ("группа", "группы", "групп"),
+        "rooms_count": ("кабинет", "кабинета", "кабинетов"),
     }
     if metric == "total_area_m2":
         return f"{num(value)} м²"

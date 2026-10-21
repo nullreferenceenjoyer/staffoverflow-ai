@@ -1,9 +1,9 @@
 """Заявки сотрудников и учреждений: приём, назначение, переписка, сводка."""
 
-from datetime import UTC
+from datetime import UTC, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from app.deps import Scope, audit, get_scope
@@ -46,7 +46,12 @@ def _person(user: User | None) -> dict | None:
 def _actions(item: IncomingRequest, user: User) -> list[str]:
     allowed: tuple[str, ...] = ()
     if helpdesk.can_manage(user, item):
-        allowed += helpdesk.WORK_TRANSITIONS.get(item.status, ())
+        work = helpdesk.WORK_TRANSITIONS.get(item.status, ())
+        if (item.assignee_id is None and item.brigade_id is not None
+                and user.brigade_id != item.brigade_id and not helpdesk.can_assign(user, item)):
+            # Заявку бригады берёт её участник; остальным — только отклонить
+            work = tuple(s for s in work if s == helpdesk.S.rejected)
+        allowed += work
     if item.author_id == user.id:
         allowed += helpdesk.AUTHOR_TRANSITIONS.get(item.status, ())
     return list(dict.fromkeys(allowed))
@@ -88,6 +93,7 @@ def _out(item: IncomingRequest, user: User, detailed: bool = False) -> dict:
         "resolution": item.resolution,
         "comments": sum(1 for e in item.events if e.kind == "comment"),
         "can_manage": helpdesk.can_manage(user, item),
+        "can_assign": helpdesk.can_assign(user, item),
         "is_author": item.author_id == user.id,
         "actions": _actions(item, user),
         "my_turn": helpdesk.my_turn(user, item),
@@ -122,7 +128,8 @@ def _assignable(scope: Scope, item: IncomingRequest) -> dict[int, User]:
     """Назначить можно любого, кто по роли вправе вести заявки этого учреждения,
     и участников бригад, за которыми учреждение закреплено."""
     people = {}
-    for role in (Role.executor, Role.director, Role.municipal_specialist, item.routed_role):
+    for role in (Role.executor, Role.cleaner, Role.director, Role.municipal_specialist,
+                 item.routed_role):
         if role == Role.brigade:
             continue
         for candidate in helpdesk.candidates(scope.db, item, role):
@@ -197,8 +204,19 @@ def list_requests(ids: str | None = None, scope: Scope = Depends(get_scope)):
 
 @router.get("/requests/stats")
 def request_stats(days: int = 30, scope: Scope = Depends(get_scope)):
-    items = list(scope.db.scalars(_query(scope)))
-    result = helpdesk.stats(items, days=max(7, min(days, 180)))
+    days = max(7, min(days, 180))
+    # Для сводки нужны открытые заявки и заявки за период — не вся история, и без ленты
+    since = helpdesk.now() - timedelta(days=days)
+    query = helpdesk.visible(scope).where(
+        or_(IncomingRequest.status.in_(helpdesk.ACTIVE), IncomingRequest.created_at >= since,
+            IncomingRequest.resolved_at >= since)
+    ).options(
+        selectinload(IncomingRequest.organization).selectinload(Organization.municipality),
+        selectinload(IncomingRequest.assignee),
+        selectinload(IncomingRequest.brigade),
+    )
+    items = list(scope.db.scalars(query))
+    result = helpdesk.stats(items, days=days)
     result["my_turn"] = sum(1 for item in items if helpdesk.my_turn(scope.user, item))
     return result
 
@@ -245,7 +263,7 @@ def get_request(request_id: int, scope: Scope = Depends(get_scope)):
     # Блок нормативного анализа видят только те, кому открыт раздел
     result["staffing"] = (staffing.request_context(scope.db, item.id)
                           if staffing.can_view(scope.user) else [])
-    if result["can_manage"]:
+    if result["can_assign"]:
         people = [_person(u) for u in _assignable(scope, item).values()]
         result["assignable"] = sorted(people, key=lambda p: p["name"])
         result["brigades"] = [
@@ -267,6 +285,11 @@ def update_request(request_id: int, body: RequestUpdate, request: Request,
     if item.status in helpdesk.FINAL:
         raise HTTPException(status.HTTP_409_CONFLICT, "Заявка закрыта, менять её нельзя")
     changes = body.model_dump(exclude_unset=True)
+    if ({"assignee_id", "brigade_id"} & set(changes)
+            and not helpdesk.can_assign(user, item)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Исполнителя или бригаду меняет сотрудник управления образования "
+                            "или администратор")
     if changes.get("due_at") is not None:
         due = changes["due_at"]
         if due.tzinfo is None:

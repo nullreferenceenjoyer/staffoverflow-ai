@@ -32,26 +32,39 @@ def new_request(client, login, title="Не закрывается дверца �
     request = created.json()
     executor = client.get("/api/auth/me", headers=login(EXECUTOR)).json()
     if request["assignee"] is None or request["assignee"]["id"] != executor["id"]:
-        moved = client.patch(f"/api/requests/{request['id']}", headers=login(DIRECTOR),
+        moved = client.patch(f"/api/requests/{request['id']}", headers=login(MUNICIPAL),
                              json={"assignee_id": executor["id"]})
         assert moved.status_code == 200, moved.text
         request = moved.json()
     return request
 
 
+def test_only_education_department_changes_assignee(client, login):
+    director, municipal = login(DIRECTOR), login(MUNICIPAL)
+    request = new_request(client, login)
+    url = f"/api/requests/{request['id']}"
+    # Директор ведёт заявку (срок, оценка), но распределение не меняет
+    seen = client.get(url, headers=director).json()
+    assert (seen["can_manage"], seen["can_assign"]) == (True, False)
+    assert "assignable" not in seen
+    refused = client.patch(url, headers=director, json={"assignee_id": None})
+    assert refused.status_code == 403
+    assert client.get(url, headers=municipal).json()["can_assign"] is True
+
+
 def test_removed_assignee_returns_request_to_manager(client, login):
-    director, executor = login(DIRECTOR), login(EXECUTOR)
+    municipal, executor = login(MUNICIPAL), login(EXECUTOR)
     request = new_request(client, login)
     url = f"/api/requests/{request['id']}"
     taken = client.post(f"{url}/status", headers=executor, json={"status": "in_progress"}).json()
     assert taken["status"] == "in_progress"
 
     # Исполнителя сняли — делать заявку некому, и она не висит «в работе» без хозяина
-    removed = client.patch(url, headers=director, json={"assignee_id": None}).json()
+    removed = client.patch(url, headers=municipal, json={"assignee_id": None}).json()
     assert (removed["status"], removed["assignee"]) == ("new", None)
     assert removed["my_turn"] == "Назначьте исполнителя"
     # Повторное снятие ничего не пишет в ленту
-    again = client.patch(url, headers=director, json={"assignee_id": None}).json()
+    again = client.patch(url, headers=municipal, json={"assignee_id": None}).json()
     assert len(again["events"]) == len(removed["events"])
 
     # Бывший исполнитель узнал, что заявка больше не его
@@ -67,7 +80,8 @@ def test_new_assignee_takes_request_into_work_himself(client, login):
     url = f"/api/requests/{request['id']}"
     client.post(f"{url}/status", headers=executor, json={"status": "in_progress"})
 
-    moved = client.patch(url, headers=director, json={"assignee_id": me["id"]}).json()
+    client.patch(url, headers=login(MUNICIPAL), json={"assignee_id": me["id"]})
+    moved = client.get(url, headers=director).json()
     assert (moved["status"], moved["assignee"]["id"]) == ("assigned", me["id"])
     assert moved["my_turn"] == "Возьмите заявку в работу"
 
@@ -79,7 +93,8 @@ def test_done_and_closed_requests_are_not_edited(client, login):
     client.post(f"{url}/status", headers=executor, json={"status": "done", "comment": "Готово"})
 
     # Выполненную не переназначают: её принимают или возвращают
-    assert client.patch(url, headers=director, json={"assignee_id": None}).status_code == 409
+    assert client.patch(url, headers=login(MUNICIPAL),
+                        json={"assignee_id": None}).status_code == 409
     returned = client.post(f"{url}/status", headers=employee,
                            json={"status": "in_progress", "comment": "Дверца снова открыта"})
     assert returned.json()["status"] == "in_progress"
@@ -106,20 +121,26 @@ def test_deadline_without_timezone_and_in_the_past(client, login):
 
 
 def test_handover_to_brigade_resets_work_and_notifies_members(client, login):
-    director, executor = login(DIRECTOR), login(EXECUTOR)
+    director, executor, municipal = login(DIRECTOR), login(EXECUTOR), login(MUNICIPAL)
     request = new_request(client, login, "Починить стул в кабинете 7")
     url = f"/api/requests/{request['id']}"
     client.post(f"{url}/status", headers=executor, json={"status": "in_progress"})
-    brigade = next(b for b in client.get(url, headers=director).json()["brigades"] if b["serves"])
+    brigade = next(b for b in client.get(url, headers=municipal).json()["brigades"]
+                   if b["serves"])
 
-    moved = client.patch(url, headers=director, json={"brigade_id": brigade["id"]}).json()
+    moved = client.patch(url, headers=municipal, json={"brigade_id": brigade["id"]}).json()
     assert (moved["status"], moved["assignee"], moved["brigade"]["id"]) == (
         "assigned", None, brigade["id"])
 
-    # Директор берёт сам: бригада с заявки снимается, ответственный — он
-    taken = client.post(f"{url}/status", headers=director, json={"status": "in_progress"}).json()
+    # Директор не может забрать заявку бригады себе: это перераспределение
+    assert client.get(url, headers=director).json()["actions"] == ["rejected"]
+    refused = client.post(f"{url}/status", headers=director, json={"status": "in_progress"})
+    assert refused.status_code == 409
+
+    # Сотрудник управления может: бригада с заявки снимается, ответственный — он
+    taken = client.post(f"{url}/status", headers=municipal, json={"status": "in_progress"}).json()
     assert taken["brigade"] is None
-    assert taken["assignee"]["role"] == "director"
+    assert taken["assignee"]["role"] == "municipal_specialist"
 
 
 def test_stages_follow_the_parent_request(client, login):

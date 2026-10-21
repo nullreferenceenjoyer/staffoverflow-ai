@@ -274,17 +274,37 @@ def set_status(schedule: StaffingSchedule, status: str) -> None:
     schedule.status = status
 
 
+def default_position(group: PersonnelGroup) -> str:
+    """Первая типовая должность группы: «Уборщик служебных помещений, гардеробщик» ->
+    «Уборщик служебных помещений». Ею подписывается строка, заведённая итогом по группе."""
+    first = (group.positions or "").split(",")[0].strip()
+    return first[:1].upper() + first[1:] if first else group.name
+
+
+def position_name(line: StaffingLine, group: PersonnelGroup | None) -> str:
+    return line.position or (default_position(group) if group else "Должность")
+
+
 def set_lines(schedule: StaffingSchedule,
-              values: dict[int, tuple[float, float | None, float | None]],
-              replace_all: bool) -> int:
-    """Ставки по группам: {группа: (утверждено, занято, оклад)}. Пустые строки не храним."""
-    keep = [line for line in schedule.lines
-            if not replace_all and line.personnel_group_id not in values]
-    schedule.lines[:] = keep
-    for group_id, (approved, occupied, salary) in values.items():
+              values: dict, replace_all: bool) -> int:
+    """Ставки: {(группа, должность): (утверждено, занято, оклад)}. Ключ — группа без
+    должности (или просто группа) заменяет все строки группы, с должностью — только эту
+    должность. Пустые строки не храним."""
+    keyed = {(key if isinstance(key, tuple) else (key, None)): value
+             for key, value in values.items()}
+    whole = {gid for gid, position in keyed if position is None}
+    named = {(gid, position.lower()) for gid, position in keyed if position}
+
+    def replaced(line: StaffingLine) -> bool:
+        return (line.personnel_group_id in whole
+                or (line.personnel_group_id, (line.position or "").lower()) in named)
+
+    schedule.lines[:] = [line for line in schedule.lines
+                         if not replace_all and not replaced(line)]
+    for (group_id, position), (approved, occupied, salary) in keyed.items():
         if not approved and occupied in (None, 0):
             continue
-        schedule.lines.append(StaffingLine(personnel_group_id=group_id,
+        schedule.lines.append(StaffingLine(personnel_group_id=group_id, position=position,
                                            approved_fte=dec(approved or 0),
                                            occupied_fte=dec(occupied),
                                            salary_rub=dec(salary)))
@@ -446,6 +466,9 @@ METRIC_COLUMNS = [
     Column("total_area_m2", "Площадь, м²", ("total_area_m2", "площадь", "общая площадь",
                                            "площадь м2", "площадь, м2"),
            note="Общая площадь помещений, м². Десятичная запятая допускается"),
+    Column("rooms_count", "Кабинеты", ("rooms_count", "кабинеты", "число кабинетов",
+                                       "помещения", "кабинетов"),
+           note="Сколько кабинетов и других помещений убирают — для норматива уборщиков"),
 ]
 LINE_COLUMNS = [
     INSTITUTION_COLUMN, YEAR_COLUMN,
@@ -453,6 +476,9 @@ LINE_COLUMNS = [
                                "группа нормирования"), required=True,
            note="Код группы (aup_clerical) или её название (Делопроизводство). "
                 "Список групп — на вкладке «Нормативы»"),
+    Column("position", "Должность", ("position", "должность", "наименование должности"),
+           note="Например: Уборщик служебных помещений. Пусто — строка итогом по группе "
+                "и заменяет все должности группы"),
     Column("approved_fte", "Утверждено ставок", ("approved_fte", "утверждено", "по штату",
                                                  "ставок по штату"), required=True,
            note="Сколько ставок группы в штатном расписании. Например: 2,5"),
@@ -499,6 +525,7 @@ METRIC_ALIASES = {
     "classes_count": ("классы", "класс"),
     "groups_count": ("группы", "группа"),
     "total_area_m2": ("площадь", "м2", "м²", "площадь м2"),
+    "rooms_count": ("кабинеты", "кабинет", "помещения"),
     "none": ("нет", "без показателя", "фиксированно", "-"),
 }
 TYPE_ALIASES = {
@@ -510,18 +537,21 @@ TYPE_ALIASES = {
 
 TEMPLATES = {
     "metrics": ("Показатели", METRIC_COLUMNS, [
-        ["OU-001-0001", "2026/2027", "840", "34", "", "12000"],
-        ["Детский сад № 12 «Солнышко»", "2026/2027", "260", "", "12", "1800"],
+        ["OU-001-0001", "2026/2027", "840", "34", "", "12000", "48"],
+        ["Детский сад № 12 «Солнышко»", "2026/2027", "260", "", "12", "1800", "30"],
     ], ["Повторная загрузка обновляет показатели учреждения за тот же год.",
         "Пустые ячейки не затирают уже введённые значения."]),
     "lines": ("Штатка", LINE_COLUMNS, [
-        ["OU-001-0001", "2026/2027", "aup_deputies", "3,5", "3,5", "62000", "Утверждено"],
-        ["OU-001-0001", "2026/2027", "Делопроизводство", "2", "2", "32000", ""],
-        ["OU-001-0001", "2026/2027", "support_cleaning", "10", "9,5", "22500", ""],
-    ], ["Только итоги по группам должностей: ставки и средний оклад. ФИО и договоры не "
-        "нужны.",
-        "Повторная загрузка заменяет ставки по группам из файла; остальные группы "
-        "учреждения не трогаются."]),
+        ["OU-001-0001", "2026/2027", "aup_deputies", "Заместитель директора по УВР", "2",
+         "2", "62000", "Утверждено"],
+        ["OU-001-0001", "2026/2027", "Делопроизводство", "Секретарь", "2", "2", "32000", ""],
+        ["OU-001-0001", "2026/2027", "support_cleaning", "Уборщик служебных помещений", "9",
+         "8,5", "22500", ""],
+        ["OU-001-0001", "2026/2027", "support_cleaning", "Гардеробщик", "1", "1", "21000",
+         ""],
+    ], ["Строка — должность: ставки по штатке, занято и средний оклад. ФИО не нужны.",
+        "Повторная загрузка заменяет должности из файла; остальные должности учреждения "
+        "не трогаются. Строка без должности заменяет всю группу."]),
     "norms": ("Нормативы", NORM_COLUMNS, [
         ["aup_deputies", "Школа", "Классы", "12", "1", "", "", "", "", "0,25", "123",
          "01.09.2026", ""],
@@ -615,10 +645,12 @@ def import_metrics(db: Session, rows: list[tuple[int, dict]], scope_query) -> tu
                 "students_count": _int(values.get("students_count", "")),
                 "classes_count": _int(values.get("classes_count", "")),
                 "groups_count": _int(values.get("groups_count", "")),
+                "rooms_count": _int(values.get("rooms_count", "")),
             }
             area = number(values.get("total_area_m2", ""))
         except ValueError:
-            result.fail(row, "Обучающиеся, классы и группы — целые неотрицательные числа")
+            result.fail(row, "Обучающиеся, классы, группы и кабинеты — целые неотрицательные "
+                             "числа")
             continue
         if area is not None and area < 0:
             result.fail(row, "Площадь не может быть отрицательной")
@@ -696,16 +728,18 @@ def import_lines(db: Session, rows: list[tuple[int, dict]], scope_query,
             result.fail(row, f"Непонятный статус «{values.get('status')}»: нужно «Утверждено» "
                              "или «Черновик»")
             continue
-        key = (org.id, year, group.id)
+        position = " ".join((values.get("position") or "").split())[:200] or None
+        key = (org.id, year, group.id, (position or "").lower())
         if key in seen:
-            result.fail(row, f"Группа «{group.name}» для учреждения за этот год уже встречалась "
-                             "выше — строка пропущена")
+            what = f"Должность «{position}»" if position else f"Группа «{group.name}»"
+            result.fail(row, f"{what} для учреждения за этот год уже встречалась выше — "
+                             "строка пропущена")
             continue
         seen.add(key)
         item = parsed.setdefault((org.id, year), {"org": org, "status": status, "lines": {}})
         if values.get("status"):
             item["status"] = status
-        item["lines"][group.id] = (approved, occupied, salary)
+        item["lines"][(group.id, position)] = (approved, occupied, salary)
 
     for (_, year), item in parsed.items():
         schedule = get_schedule(db, item["org"], year)

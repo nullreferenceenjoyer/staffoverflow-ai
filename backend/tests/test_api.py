@@ -128,19 +128,20 @@ def test_employee_sees_only_own_requests(client, login):
 
 
 def test_request_can_be_reassigned_only_to_someone_from_the_organization(client, login):
-    director = login(DIRECTOR)
+    # Распределение меняет управление образования; директор — среди тех, кому можно отдать
+    director, municipal = login(DIRECTOR), login("municipal@demo.ru")
     request = client.post("/api/requests", headers=login(EMPLOYEE),
                           json={"title": "Не горит лампа в коридоре"}).json()
-    details = client.get(f"/api/requests/{request['id']}", headers=director).json()
-    assert details["can_manage"]
+    details = client.get(f"/api/requests/{request['id']}", headers=municipal).json()
+    assert details["can_assign"]
     me = client.get("/api/auth/me", headers=director).json()
     assert me["id"] in {p["id"] for p in details["assignable"]}
 
-    moved = client.patch(f"/api/requests/{request['id']}", headers=director,
+    moved = client.patch(f"/api/requests/{request['id']}", headers=municipal,
                          json={"assignee_id": me["id"]}).json()
     assert moved["assignee"]["id"] == me["id"]
     observer = client.get("/api/auth/me", headers=login(OBSERVER)).json()
-    assert client.patch(f"/api/requests/{request['id']}", headers=director,
+    assert client.patch(f"/api/requests/{request['id']}", headers=municipal,
                         json={"assignee_id": observer["id"]}).status_code == 422
 
 
